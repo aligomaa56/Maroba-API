@@ -1,0 +1,246 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("POSTGRESQL_URI")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// --- Enums ---
+enum UserRole {
+  USER
+  ARTIST
+  ADMIN
+}
+
+enum OrderStatus {
+  DRAFT
+  PENDING
+  PROCESSING
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  AUTHORIZED
+  CAPTURED
+  REFUNDED
+  FAILED
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+}
+
+enum PriceStatus {
+  PENDING       // Waiting for price quote
+  QUOTED        // Price set by artist
+  APPROVED      // Customer accepted price
+  NEEDS_REVISION // Customer requested changes
+}
+
+// --- Core Models ---
+model User {
+  id                  String         @id @default(uuid())
+  email               String         @unique
+  username            String         @unique
+  firstName           String?
+  lastName            String?
+  password            String
+  role                UserRole       @default(USER)
+  isVerified          Boolean        @default(false)
+  verificationToken   String?
+  verificationTokenExpires DateTime?
+  resetPasswordToken  String?
+  resetPasswordExpire DateTime?
+  failedLoginAttempts Int            @default(0)
+  accountLockedUntil  DateTime?
+  googleId            String?
+  isGoogleUser        Boolean        @default(false)
+  refreshTokens       RefreshToken[]
+  addresses           Address[]
+  orders              Order[]
+  sentMessages        Message[]      @relation("sentMessages")
+  receivedMessages    Message[]      @relation("receivedMessages")
+  likes               Like[]
+  reviews             Review[]
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  Product             Product[]
+  DiscountUse         DiscountUse[]
+
+  @@index([email])
+  @@index([role])
+}
+
+model Order {
+  id            String            @id @default(uuid())
+  user          User              @relation(fields: [userId], references: [id])
+  userId        String
+  status        OrderStatus       @default(DRAFT)
+  customDetails Json              // Required field for custom specifications
+  attachments   OrderAttachment[]
+  quotedPrice   Float?            // Final price set by artist/admin
+  priceStatus   PriceStatus       @default(PENDING)
+  discount      Discount?         @relation(fields: [discountId], references: [id])
+  payment       Payment?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  discountId    String?
+  DiscountUse   DiscountUse[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model Product {
+  id          String   @id @default(uuid())
+  title       String
+  description String
+  basePrice   Float    // Suggested price for similar custom work
+  images      String[] // Example images for inspiration
+  attributes  Json?    // Suggested attributes { sizes: [], materials: [] }
+  isActive    Boolean  @default(true)
+  artist      User     @relation(fields: [artistId], references: [id])
+  artistId    String
+  likes       Like[]
+  reviews     Review[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([artistId])
+}
+
+model OrderAttachment {
+  id          String   @id @default(uuid())
+  order       Order    @relation(fields: [orderId], references: [id])
+  orderId     String
+  url         String
+  description String?
+  scanStatus  FileScan @relation(fields: [scanId], references: [id])
+  scanId      String
+  createdAt   DateTime @default(now())
+}
+
+model FileScan {
+  id              String            @id @default(uuid())
+  status          String            @default("PENDING") // CLEAN, INFECTED
+  scannedAt       DateTime?
+  createdAt       DateTime          @default(now())
+  OrderAttachment OrderAttachment[]
+}
+
+// --- Supporting Models ---
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([token])
+}
+
+model Address {
+  id         String  @id @default(uuid())
+  user       User    @relation(fields: [userId], references: [id])
+  userId     String
+  street     String
+  city       String
+  state      String
+  postalCode String
+  country    String
+  isDefault  Boolean @default(false)
+
+  @@index([userId])
+}
+
+model Like {
+  id        String   @id @default(uuid())
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  product   Product  @relation(fields: [productId], references: [id])
+  productId String
+  createdAt DateTime @default(now())
+
+  @@unique([userId, productId])
+  @@index([productId])
+}
+
+model Review {
+  id        String   @id @default(uuid())
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  product   Product  @relation(fields: [productId], references: [id])
+  productId String
+  comment   String?
+  createdAt DateTime @default(now())
+
+  @@unique([userId, productId])
+  @@index([productId])
+}
+
+model Discount {
+  id           String        @id @default(uuid())
+  code         String        @unique
+  type         DiscountType
+  value        Float
+  minOrder     Float?
+  maxUses      Int?
+  startDate    DateTime?
+  endDate      DateTime?
+  isActive     Boolean       @default(true)
+  discountUses DiscountUse[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  Order        Order[]
+
+  @@index([code])
+}
+
+model DiscountUse {
+  id         String   @id @default(uuid())
+  discount   Discount @relation(fields: [discountId], references: [id])
+  discountId String
+  order      Order    @relation(fields: [orderId], references: [id])
+  orderId    String
+  user       User     @relation(fields: [userId], references: [id])
+  userId     String
+  usedAt     DateTime @default(now())
+
+  @@index([discountId])
+  @@index([userId])
+}
+
+model Payment {
+  id            String        @id @default(uuid())
+  order         Order         @relation(fields: [orderId], references: [id])
+  orderId       String        @unique
+  quotedAmount  Float         // Locked price at payment time
+  finalAmount   Float         // Actual charged amount
+  currency      String        @default("EGP")
+  paymentMethod String
+  transactionId String        @unique
+  status        PaymentStatus @default(PENDING)
+  createdAt     DateTime      @default(now())
+
+  @@index([transactionId])
+}
+
+model Message {
+  id          String   @id @default(uuid())
+  content     String
+  sender      User     @relation("sentMessages", fields: [senderId], references: [id])
+  senderId    String
+  receiver    User     @relation("receivedMessages", fields: [receiverId], references: [id])
+  receiverId  String
+  attachments String[]
+  createdAt   DateTime @default(now())
+
+  @@index([senderId, receiverId])
+  @@index([receiverId])
+}
