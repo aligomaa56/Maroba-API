@@ -3,3 +3,4 @@ logs/
 .env
 src/prisma/migrations/
 yarn.lock
+.vercel

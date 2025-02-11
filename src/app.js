@@ -32,6 +32,11 @@ app.use(cors(corsOptions));
 app.use(publicLimiter); // Apply to all routes
 // app.use(fileScanner);
 
+// Hello From Api Route
+app.get('/', (req, res) => {
+  res.send('Hello From Maroba API');
+});
+
 // API routes with specific rate limits
 app.use('/api/auth', authRoutes);
 // app.use('/api/products', apiLimiter, productRoutes);
