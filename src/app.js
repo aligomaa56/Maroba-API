@@ -5,6 +5,7 @@ import cors from 'cors';
 import corsOptions from './config/cors.config.js';
 import { errorHandler } from './middleware/error.middleware.js';
 import { publicLimiter, authLimiter, apiLimiter } from './middleware/rate-limiter.middleware.js';
+import { connectDatabase } from './prisma/prisma.client.js';
 // import { fileScanner } from './middleware/file-scanner.middleware.js';
 
 
@@ -18,6 +19,17 @@ import authRoutes from './routes/auth.routes.js';
 // import adminRoutes from './routes/admin.routes.js';
 
 const app = express();
+
+// Database connection middleware
+app.use(async (req, res, next) => {
+  try {
+    await connectDatabase();
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
 
 // Google OAuth2.0
 configurePassport();
@@ -33,8 +45,12 @@ app.use(publicLimiter); // Apply to all routes
 // app.use(fileScanner);
 
 // Hello From Api Route
-app.get('/', (req, res) => {
-  res.send('Hello From Maroba API');
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok',
+    database: 'connected',
+    timestamp: new Date().toISOString()
+  });
 });
 
 // API routes with specific rate limits

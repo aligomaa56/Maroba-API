@@ -1,62 +1,88 @@
+// server.js - Updated with robust startup sequence
 import app from './app.js';
 import { env } from './config/env.config.js';
 import { createServer } from 'http';
 import logger from './middleware/logger.middleware.js';
-import { connectDatabase } from './prisma/prisma.client.js';
-// import { initializeWebSocket } from './config/websocket.config.js';
+import { connectDatabase, disconnectDatabase } from './prisma/prisma.client.js';
 import { connectRedis, disconnectRedis } from './config/redis.config.js';
-// import { cloudinaryConfig } from './config/cloudinary.config.js';
 
 const httpServer = createServer(app);
+const PORT = env.PORT || 3000;
 
-// Graceful shutdown handling
-const shutdown = async () => {
-  logger.info('🛑 Shutting down server...');
-  await disconnectRedis();
+// Graceful shutdown handler
+const shutdown = async (signal) => {
+  logger.info(`🛑 Received ${signal}, shutting down...`);
+  
+  try {
+    await disconnectDatabase();
+    logger.info('🔌 Database connection closed');
+  } catch (dbError) {
+    logger.error('🚨 Database shutdown error:', dbError);
+  }
+
+  try {
+    await disconnectRedis();
+    logger.info('🔴 Redis connection closed');
+  } catch (redisError) {
+    logger.error('🚨 Redis shutdown error:', redisError);
+  }
+
   httpServer.close(() => {
-    logger.info('🚫 Server terminated');
+    logger.info('🚫 HTTP server closed');
     process.exit(0);
   });
+
+  // Force exit after 10 seconds
+  setTimeout(() => {
+    logger.error('🕛 Shutdown timeout forced exit');
+    process.exit(1);
+  }, 10000);
 };
 
-process.on('uncaughtException', (err) => {
-  logger.error('🚨 Uncaught Exception:', err.stack || err);
-  shutdown();
-});
+// Process event handlers
+const registerProcessHandlers = () => {
+  process
+    .on('uncaughtException', (err) => {
+      logger.error('🚨 Uncaught Exception:', err.stack || err);
+      shutdown('UNCAUGHT_EXCEPTION');
+    })
+    .on('unhandledRejection', (reason) => {
+      logger.error('🚨 Unhandled Rejection:', reason);
+      shutdown('UNHANDLED_REJECTION');
+    })
+    .on('SIGTERM', () => shutdown('SIGTERM'))
+    .on('SIGINT', () => shutdown('SIGINT'));
+};
 
-process.on('unhandledRejection', (reason) => {
-  logger.error('🚨 Unhandled Rejection:', reason);
-  shutdown();
-});
-
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
-
-async function startServer() {
+// Main server startup
+const startServer = async () => {
   try {
+    registerProcessHandlers();
+
     // Initialize core services
-    await connectRedis();
-    await connectDatabase();
-    // await cloudinaryConfig();
+    await Promise.all([
+      connectRedis(),
+      connectDatabase()
+    ]);
 
-    // Initialize WebSocket
-    // initializeWebSocket(httpServer);
-
-    // Start the server
-    httpServer.listen(env.PORT, () => {
+    // Start server
+    httpServer.listen(PORT, () => {
       logger.info(`
         🚀 Server running in ${env.NODE_ENV} mode
-        📡 Port: ${env.PORT}
-        ☁️ Cloud: ${env.CLOUDINARY_CLOUD_NAME}
+        📡 Port: ${PORT}
+        ☁️  Cloud: ${env.CLOUDINARY_CLOUD_NAME}
         🔒 Redis: ${env.REDIS_URL ? 'Connected' : 'Disabled'}
+        🗄️  Database: Connected
       `);
     });
-  } catch (error) {
-    logger.error('🔥 Failed to start server:', error);
-    process.exit(1);
-  }
-}
 
+  } catch (error) {
+    logger.error('🔥 Critical startup failure:', error);
+    await shutdown('STARTUP_FAILURE');
+  }
+};
+
+// Start the application
 startServer();
 
 export default httpServer;
