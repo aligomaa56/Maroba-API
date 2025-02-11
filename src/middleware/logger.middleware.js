@@ -9,7 +9,7 @@ const logFormat = printf(({ level, message, timestamp, stack }) => {
   return `${timestamp} - ${level.toUpperCase()} - ${stack || message}`;
 });
 
-// Transport for rotating error files
+// File transports only in non-production
 const errorTransport = new DailyRotateFile({
   level: 'error',
   filename: 'logs/error-%DATE%.log',
@@ -19,7 +19,6 @@ const errorTransport = new DailyRotateFile({
   maxFiles: '30d',
 });
 
-// Transport for rotating combined logs
 const combinedTransport = new DailyRotateFile({
   filename: 'logs/combined-%DATE%.log',
   datePattern: 'YYYY-MM-DD',
@@ -28,13 +27,16 @@ const combinedTransport = new DailyRotateFile({
   maxFiles: '30d',
 });
 
+// Transports configuration
 const transports = [
-  errorTransport,
-  combinedTransport,
+  // Add file transports only if not in production
+  ...(env.NODE_ENV !== 'production' ? [errorTransport, combinedTransport] : []),
+  // Console transport always enabled
   new winston.transports.Console({
     format: combine(
       colorize(),
       timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+      errors({ stack: true }), // Include stack traces for errors
       logFormat
     ),
   }),
@@ -49,12 +51,13 @@ const logger = winston.createLogger({
     logFormat
   ),
   transports,
-  exceptionHandlers: [
+  // Exception and rejection handlers only in non-production
+  exceptionHandlers: env.NODE_ENV !== 'production' ? [
     new winston.transports.File({ filename: 'logs/exceptions.log' }),
-  ],
-  rejectionHandlers: [
+  ] : [],
+  rejectionHandlers: env.NODE_ENV !== 'production' ? [
     new winston.transports.File({ filename: 'logs/rejections.log' }),
-  ],
+  ] : [],
 });
 
 // Handle uncaught exceptions and rejections
