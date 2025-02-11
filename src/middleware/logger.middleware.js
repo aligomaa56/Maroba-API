@@ -9,40 +9,41 @@ const logFormat = printf(({ level, message, timestamp, stack }) => {
   return `${timestamp} - ${level.toUpperCase()} - ${stack || message}`;
 });
 
-// File transports only in non-production
-const errorTransport = new DailyRotateFile({
-  level: 'error',
-  filename: 'logs/error-%DATE%.log',
-  datePattern: 'YYYY-MM-DD',
-  zippedArchive: true,
-  maxSize: '20m',
-  maxFiles: '30d',
-});
-
-const combinedTransport = new DailyRotateFile({
-  filename: 'logs/combined-%DATE%.log',
-  datePattern: 'YYYY-MM-DD',
-  zippedArchive: true,
-  maxSize: '20m',
-  maxFiles: '30d',
-});
-
-// Transports configuration
+// Configure transports conditionally
 const transports = [
-  // Add file transports only if not in production
-  ...(env.NODE_ENV !== 'production' ? [errorTransport, combinedTransport] : []),
-  // Console transport always enabled
+  // Always include console transport
   new winston.transports.Console({
     format: combine(
       colorize(),
       timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-      errors({ stack: true }), // Include stack traces for errors
+      errors({ stack: true }),
       logFormat
     ),
   }),
 ];
 
-// Main logger instance
+// Add file transports ONLY in non-production environments
+if (env.NODE_ENV !== 'production') {
+  transports.push(
+    new DailyRotateFile({
+      level: 'error',
+      filename: 'logs/error-%DATE%.log',
+      datePattern: 'YYYY-MM-DD',
+      zippedArchive: true,
+      maxSize: '20m',
+      maxFiles: '30d',
+    }),
+    new DailyRotateFile({
+      filename: 'logs/combined-%DATE%.log',
+      datePattern: 'YYYY-MM-DD',
+      zippedArchive: true,
+      maxSize: '20m',
+      maxFiles: '30d',
+    })
+  );
+}
+
+// Main logger configuration
 const logger = winston.createLogger({
   level: env.NODE_ENV === 'development' ? 'debug' : 'info',
   format: combine(
@@ -51,16 +52,16 @@ const logger = winston.createLogger({
     logFormat
   ),
   transports,
-  // Exception and rejection handlers only in non-production
+  // Only add file-based exception handlers in non-production
   exceptionHandlers: env.NODE_ENV !== 'production' ? [
-    new winston.transports.File({ filename: 'logs/exceptions.log' }),
+    new winston.transports.File({ filename: 'logs/exceptions.log' })
   ] : [],
   rejectionHandlers: env.NODE_ENV !== 'production' ? [
-    new winston.transports.File({ filename: 'logs/rejections.log' }),
+    new winston.transports.File({ filename: 'logs/rejections.log' })
   ] : [],
 });
 
-// Handle uncaught exceptions and rejections
+// Error handling remains the same
 process.on('uncaughtException', (error) => {
   logger.error('Uncaught Exception:', error);
   process.exit(1);
