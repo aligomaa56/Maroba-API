@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "description": "Art Platform project",
-  "main": "src/app.js",
+  "main": "src/server.js",
   "scripts": {
     "dev": "NODE_ENV=development nodemon src/server.js",
     "start": "NODE_ENV=production node src/server.js",
