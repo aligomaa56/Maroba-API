@@ -54,7 +54,7 @@ app.get('/health', (req, res) => {
 });
 
 // API routes with specific rate limits
-app.use('/api/auth', authRoutes);
+app.use('/api/auth', authLimiter, authRoutes);
 // app.use('/api/products', apiLimiter, productRoutes);
 // app.use('/api/orders', apiLimiter, orderRoutes);
 // app.use('/api/chat', apiLimiter, chatRoutes);

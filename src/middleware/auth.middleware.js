@@ -1,8 +1,9 @@
+// src/middleware/auth.middleware.js
 import jwt from 'jsonwebtoken';
 import { AppError } from './error.middleware.js';
+import { CacheService } from '../services/cache.service.js';
 
-// Protect middleware: verifies JWT token and attaches user info to req.user.
-export const protect = (req, res, next) => {
+export const protect = async (req, res, next) => {
   let token;
 
   if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
@@ -15,6 +16,13 @@ export const protect = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
+
+    // Check if the token has been blacklisted.
+    const isBlacklisted = await CacheService.exists(`blacklist:${decoded.jti}`);
+    if (isBlacklisted) {
+      return next(new AppError(401, 'Token has been revoked'));
+    }
+
     req.user = { id: decoded.userId, role: decoded.role };
     next();
   } catch (error) {

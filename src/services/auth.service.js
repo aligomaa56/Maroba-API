@@ -32,10 +32,11 @@ function parseExpiration(expiration) {
 }
 
 class AuthService {
+  // Register a new user
   async register(email, username, password, req) {
     logger.info(`Attempting registration for email: ${email}`);
 
-    // Check if a user already exists with the given email or username.
+    // Check if a user with the same email or username exists.
     const existingUser = await prisma.user.findFirst({
       where: {
         OR: [{ email }, { username }],
@@ -47,17 +48,15 @@ class AuthService {
       throw new AppError(400, 'Registration failed');
     }
 
-    // Hash the password before saving it.
+    // Hash the password.
     const hashedPassword = await bcrypt.hash(password, 12);
 
-    // Generate a verification token
+    // Generate a verification token.
+    // rawToken will be sent to the user; hashedToken is stored in the DB.
     const rawToken = crypto.randomBytes(32).toString('hex');
-    const hashedToken = crypto
-      .createHash('sha256')
-      .update(rawToken)
-      .digest('hex');
+    const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
 
-    // Create the new user with default properties.
+    // Create the user with default properties.
     const newUser = await prisma.user.create({
       data: {
         email,
@@ -66,26 +65,21 @@ class AuthService {
         failedLoginAttempts: 0,
         accountLockedUntil: null,
         isVerified: false,
-        role: UserRole.USER, // default role
+        role: UserRole.USER,
         verificationToken: hashedToken,
         verificationTokenExpires: new Date(Date.now() + 24 * 60 * 60 * 1000),
       },
     });
 
-    // Send verification email with the **raw token** (not the hashed one)
-    await notificationService.sendVerificationNotification(
-      email,
-      rawToken,
-      req
-    );
+    // Send verification email with the raw (unencrypted) token.
+    await notificationService.sendVerificationNotification(email, rawToken, req);
 
     logger.info(`User registered successfully: ${email}`);
-
     return { id: newUser.id, email: newUser.email, username: newUser.username };
   }
-  // Standard login using email/username and password.
+
+  // Login using email/username and password.
   async login(identifier, password, ip) {
-    // Add input validation
     if (!identifier || !password) {
       logger.warn(`Login attempt with missing credentials from IP: ${ip}`);
       throw new AppError(400, 'Both identifier and password are required');
@@ -104,7 +98,7 @@ class AuthService {
         accountLockedUntil: true,
         isVerified: true,
         role: true,
-        email: true, // Added for better logging
+        email: true,
         username: true,
       },
     });
@@ -125,13 +119,14 @@ class AuthService {
     }
   }
 
+  // Verify the email using the token from the URL.
   async verifyEmail(token) {
     if (!token) {
       logger.warn('Email verification attempt without token');
       throw new AppError(400, 'Verification token is required');
     }
 
-    // Hash the incoming token to match database record
+    // Hash the incoming token to compare with the stored hashed token.
     const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
     const user = await prisma.user.findFirst({
@@ -157,17 +152,13 @@ class AuthService {
         isVerified: true,
         verificationToken: null,
         verificationTokenExpires: null,
-        // Reset any potential security flags
         failedLoginAttempts: 0,
         accountLockedUntil: null,
       },
     });
 
     logger.info(`Email verified successfully for user: ${user.email}`);
-
-    // Automatically log in the user after verification
     const tokens = await this.generateTokens(updatedUser.id, updatedUser.role);
-
     return {
       user: {
         id: updatedUser.id,
@@ -179,16 +170,12 @@ class AuthService {
     };
   }
 
-  // Logout by blacklisting the provided refresh token.
+  // Logout by blacklisting the refresh token.
   async logout(refreshToken) {
     try {
       const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
-      // Use CacheService to set a blacklist entry (with a TTL equal to the token’s lifetime).
-      await CacheService.set(
-        `blacklist:${decoded.jti}`,
-        'true',
-        60 * 60 * 24 * 7
-      );
+      // Use CacheService (which is integrated with Redis) to blacklist the token.
+      await CacheService.set(`blacklist:${decoded.jti}`, 'true', 60 * 60 * 24 * 7);
       logger.info(`Logged out token with jti: ${decoded.jti}`);
     } catch (error) {
       logger.error('Logout failed:', error);
@@ -205,7 +192,6 @@ class AuthService {
       logger.error('Refresh token verification failed:', error);
       throw new AppError(401, 'Invalid refresh token');
     }
-    // Check if token is blacklisted.
     const isBlacklisted = await CacheService.exists(`blacklist:${decoded.jti}`);
     if (isBlacklisted) {
       logger.warn(`Refresh token revoked: ${decoded.jti}`);
@@ -215,7 +201,7 @@ class AuthService {
     return this.generateTokens(decoded.userId, decoded.role);
   }
 
-  // Start the forgot password process.
+  // Initiate the forgot password process.
   async forgotPassword(email, req) {
     logger.info(`Password reset requested for email: ${email}`);
     const user = await prisma.user.findUnique({ where: { email } });
@@ -224,14 +210,10 @@ class AuthService {
       return;
     }
 
-    // Generate raw and hashed tokens
+    // Generate raw and hashed tokens.
     const rawToken = crypto.randomBytes(32).toString('hex');
-    const hashedToken = crypto
-      .createHash('sha256')
-      .update(rawToken)
-      .digest('hex');
-
-    const expires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+    const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const expires = new Date(Date.now() + 15 * 60 * 1000);
 
     await prisma.user.update({
       where: { id: user.id },
@@ -241,28 +223,18 @@ class AuthService {
       },
     });
 
-    await notificationService.sendPasswordResetNotification(
-      email,
-      rawToken,
-      req
-    );
+    await notificationService.sendPasswordResetNotification(email, rawToken, req);
     logger.info(`Password reset token sent to email: ${email}`);
   }
 
-  // Complete the password reset.
+  // Complete the password reset process.
   async resetPassword(rawToken, newPassword) {
-    logger.info(`Resetting password using token`);
-
+    logger.info('Resetting password using token');
     if (!rawToken) {
       throw new AppError(400, 'Invalid reset token');
     }
 
-    // Hash the raw token for database comparison
-    const hashedToken = crypto
-      .createHash('sha256')
-      .update(rawToken)
-      .digest('hex');
-
+    const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
     const user = await prisma.user.findFirst({
       where: {
         resetPasswordToken: hashedToken,
@@ -271,7 +243,7 @@ class AuthService {
     });
 
     if (!user) {
-      logger.warn(`Invalid or expired reset token`);
+      logger.warn('Invalid or expired reset token');
       throw new AppError(400, 'Invalid or expired token');
     }
 
@@ -305,8 +277,8 @@ class AuthService {
       logger.warn(`User not found for password update: ${userId}`);
       throw new AppError(404, 'User not found');
     }
-    await this.verifyPassword(user.password, currentPassword);
 
+    await this.verifyPassword(user.password, currentPassword);
     const hashedPassword = await bcrypt.hash(newPassword, 12);
 
     await prisma.$transaction([
@@ -317,7 +289,6 @@ class AuthService {
       prisma.refreshToken.deleteMany({ where: { userId } }),
     ]);
 
-    // Remove the token cache for this user.
     await CacheService.delete(`user:${userId}:tokens`);
     logger.info(`Password updated successfully for user: ${userId}`);
   }
@@ -369,25 +340,21 @@ class AuthService {
   
   // Generate a new access and refresh token pair.
   async generateTokens(userId, role) {
+    // Generate a unique token identifier
     const jti = crypto.randomUUID();
 
-    const accessTokenPayload = { userId, role };
+    // Include the jti in both tokens
+    const accessTokenPayload = { userId, role, jti };
     const refreshTokenPayload = { userId, role, jti };
 
-    const accessTokenOptions = {
-      expiresIn: parseExpiration(JWT_EXPIRES_IN),
-    };
-
-    const refreshTokenOptions = {
-      expiresIn: parseExpiration(REFRESH_TOKEN_EXPIRY),
-    };
+    const accessTokenOptions = { expiresIn: parseExpiration(JWT_EXPIRES_IN) };
+    const refreshTokenOptions = { expiresIn: parseExpiration(REFRESH_TOKEN_EXPIRY) };
 
     const accessToken = jwt.sign(
       accessTokenPayload,
       process.env.JWT_ACCESS_SECRET,
       accessTokenOptions
     );
-
     const refreshToken = jwt.sign(
       refreshTokenPayload,
       process.env.JWT_REFRESH_SECRET,

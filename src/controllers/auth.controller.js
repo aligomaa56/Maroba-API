@@ -20,21 +20,12 @@ export const register = catchAsync(async (req, res, next) => {
     });
 });
 
-/**
- * POST /api/auth/logout
- * Request Body: { refreshToken: string }
- */
 export const logout = catchAsync(async (req, res, next) => {
   const { refreshToken } = req.body;
   await authService.logout(refreshToken);
   res.status(200).json({ success: true, message: 'Logged out successfully' });
 });
 
-/**
- * POST /api/auth/refresh-token
- * Request Body: { refreshToken: string }
- * Response: { accessToken: string, refreshToken: string }
- */
 export const refreshToken = catchAsync(async (req, res, next) => {
   const { refreshToken } = req.body;
   const tokens = await authService.refreshToken(refreshToken);
@@ -80,11 +71,25 @@ export const updatePassword = catchAsync(async (req, res, next) => {
     .json({ success: true, message: 'Password updated successfully' });
 });
 
-/**
- * POST /api/auth/google-login
- * Request Body: { idToken: string }
- * Response: { accessToken: string, refreshToken: string }
- */
+export const verifyEmail = catchAsync(async (req, res, next) => {
+  const token = Array.isArray(req.query.token)
+    ? req.query.token[0]
+    : req.query.token;
+
+  if (!token) {
+    throw new AppError(400, 'Verification token is required');
+  }
+  const result = await authService.verifyEmail(token);
+  res.status(200).json({
+    success: true,
+    message: 'Email verified successfully',
+    data: {
+      user: result.user,
+      tokens: result.tokens,
+    },
+  });
+});
+
 // export const googleLogin = catchAsync(async (req, res, next) => {
 //   const { idToken } = req.body;
 //   const tokens = await authService.googleLogin(idToken, req);
@@ -112,24 +117,4 @@ export const googleAuthCallback = catchAsync(async (req, res) => {
 
     res.redirect(`${redirectUrl}?access_token=${tokens.accessToken}&refresh_token=${tokens.refreshToken}`);
   })(req, res);
-});
-
-
-export const verifyEmail = catchAsync(async (req, res, next) => {
-  const token = Array.isArray(req.query.token)
-    ? req.query.token[0]
-    : req.query.token;
-
-  if (!token) {
-    throw new AppError(400, 'Verification token is required');
-  }
-  const result = await authService.verifyEmail(token);
-  res.status(200).json({
-    success: true,
-    message: 'Email verified successfully',
-    data: {
-      user: result.user,
-      tokens: result.tokens,
-    },
-  });
 });

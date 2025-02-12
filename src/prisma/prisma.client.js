@@ -5,7 +5,7 @@ import logger from '../middleware/logger.middleware.js';
 
 const prisma = global.prisma || new PrismaClient({
   log: env.NODE_ENV === 'development' 
-    ? ['query', 'info', 'warn', 'error']
+    ? ['info', 'warn', 'error']
     : ['warn', 'error'],
   errorFormat: 'minimal',
   datasources: {
