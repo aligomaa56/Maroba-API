@@ -12,7 +12,7 @@ const PORT = env.PORT || 3000;
 // Graceful shutdown handler
 const shutdown = async (signal) => {
   logger.info(`🛑 Received ${signal}, shutting down...`);
-  
+
   try {
     await disconnectDatabase();
     logger.info('🔌 Database connection closed');
@@ -60,22 +60,16 @@ const startServer = async () => {
     registerProcessHandlers();
 
     // Initialize core services
-    await Promise.all([
-      connectRedis(),
-      connectDatabase()
-    ]);
+    await Promise.all([connectRedis(), connectDatabase()]);
 
     // Start server
     httpServer.listen(PORT, () => {
       logger.info(`
-        🚀 Server running in ${env.NODE_ENV} mode
-        📡 Port: ${PORT}
-        ☁️  Cloud: ${env.CLOUDINARY_CLOUD_NAME}
+        🚀 Server running in ${env.NODE_ENV} mode on port ${env.PORT}
         🔒 Redis: ${env.REDIS_URL ? 'Connected' : 'Disabled'}
-        🗄️  Database: Connected
+        🗄️  Database: ${env.POSTGRESQL_URI ? 'Connected' : 'Disabled'}
       `);
     });
-
   } catch (error) {
     logger.error('🔥 Critical startup failure:', error);
     await shutdown('STARTUP_FAILURE');
