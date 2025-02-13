@@ -6,6 +6,12 @@ import logger from './middleware/logger.middleware.js';
 import { connectDatabase, disconnectDatabase } from './prisma/prisma.client.js';
 import { connectRedis, disconnectRedis } from './config/redis.config.js';
 
+if (process.env.VERCEL) {
+  logger.info('🦄 Vercel environment detected - exporting handler');
+  module.exports.handler = app;
+  process.exit(0); // Exit immediately after exporting handler
+}
+
 if (!global.__serverStarted) {
   global.__serverStarted = false;
 }
@@ -66,13 +72,17 @@ const registerProcessHandlers = () => {
 // Main server startup
 const startServer = async () => {
   try {
-    registerProcessHandlers();
+    if (global.__serverStarted) {
+      logger.warn('Server already initialized');
+      return;
+    }
 
-    // Initialize core services once
+    registerProcessHandlers();
     await Promise.all([connectRedis(), connectDatabase()]);
 
-    if (!isServerListening) {
+    if (!process.env.VERCEL && !isServerListening) {
       server.listen(PORT, () => {
+        global.__serverStarted = true;
         isServerListening = true;
         logger.info(`
           🚀 Server running in ${env.NODE_ENV} mode on port ${PORT}
@@ -80,8 +90,6 @@ const startServer = async () => {
           🗄️  Database: ${env.POSTGRESQL_URI ? 'Connected' : 'Disabled'}
         `);
       });
-    } else {
-      logger.warn('Server is already listening.');
     }
   } catch (error) {
     logger.error('🔥 Critical startup failure:', error);

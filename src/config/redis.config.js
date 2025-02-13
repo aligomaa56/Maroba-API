@@ -41,9 +41,10 @@ const getRedisConfig = () => {
                 rejectUnauthorized: false, // Bypass certificate validation if needed
               }
             : undefined,
-        connectTimeout: 10000, // 10 seconds timeout for connection
-        reconnectStrategy: (retries) => Math.min(retries * 100, 5000),
+        connectTimeout: 15000, // 10 seconds timeout for connection
+        reconnectStrategy: (retries) => Math.min(retries * 200, 10000),
       },
+      pingInterval: 10000, // 30 seconds interval for ping
     };
   } else {
     // Fallback configuration (if NODE_ENV is neither development nor production)
