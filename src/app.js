@@ -4,37 +4,56 @@ import configurePassport from './config/passport.config.js';
 import cors from 'cors';
 import corsOptions from './config/cors.config.js';
 import { errorHandler } from './middleware/error.middleware.js';
-import { publicLimiter, authLimiter} from './middleware/rate-limiter.middleware.js';
-import { prisma } from './prisma/prisma.client.js';
+import { publicLimiter, authLimiter, apiLimiter } from './middleware/rate-limiter.middleware.js';
+import { connectDatabase } from './prisma/prisma.client.js';
+// import { fileScanner } from './middleware/file-scanner.middleware.js';
+
+
+// Routes imports
 import authRoutes from './routes/auth.routes.js';
-import logger from './middleware/logger.middleware.js';
-import { env } from './config/env.config.js';
+// import productRoutes from './routes/product.routes.js';
+// import orderRoutes from './routes/order.routes.js';
+// import chatRoutes from './routes/chat.routes.js';
+// import customRequestRoutes from './routes/custom-request.routes.js';
+// import discountRoutes from './routes/discount.routes.js';
+// import adminRoutes from './routes/admin.routes.js';
 
 const app = express();
 
-logger.info('Initializing application...');
+// Google OAuth2.0
+configurePassport();
+app.use(passport.initialize());
 
-// Security middleware pipeline
-app.use([
-  express.json(),
-  express.urlencoded({ extended: true }),
-  cors(corsOptions),
-  publicLimiter
-]);
+// Basic middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(cors(corsOptions));
 
-// Health check endpoint
+// Security middleware
+app.use(publicLimiter); // Apply to all routes
+// app.use(fileScanner);
+
+// Hello From Api Route
 app.get('/health', (req, res) => {
-  res.status(200).json({
+  res.status(200).json({ 
     status: 'ok',
+    database: 'connected',
     timestamp: new Date().toISOString()
   });
 });
 
-// Routes
-app.use('/api/auth',authLimiter, authRoutes);
+// API routes with specific rate limits
+app.use('/api/auth', authLimiter, authRoutes);
+// app.use('/api/products', apiLimiter, productRoutes);
+// app.use('/api/orders', apiLimiter, orderRoutes);
+// app.use('/api/chat', apiLimiter, chatRoutes);
+// app.use('/api/custom-requests', apiLimiter, customRequestRoutes);
+// app.use('/api/discounts', apiLimiter, discountRoutes);
 
+// Admin routes with stricter rate limits
+// app.use('/api/admin', authLimiter, adminRoutes);
+
+// Error handling
 app.use(errorHandler);
-
-logger.info('✅ Application initialized successfully.');
 
 export default app;

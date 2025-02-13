@@ -1,6 +1,8 @@
+// src/config/redis.config.js - Revised for Improved Error Handling
 import { createClient } from 'redis';
 import { env } from './env.config.js';
 import logger from '../middleware/logger.middleware.js';
+import { AppError } from '../middleware/error.middleware.js';
 
 const getRedisConfig = () => {
   if (env.NODE_ENV === 'development') {
@@ -25,7 +27,7 @@ const getRedisConfig = () => {
 
   // Production configuration
   if (!env.REDIS_URL) {
-    throw new Error('REDIS_URL is required in production environment');
+    throw new AppError(500, 'REDIS_URL is required in production environment');
   }
 
   return {
@@ -53,7 +55,8 @@ export async function connectRedis() {
     redisClient.on('ready', () => logger.info('Redis connection ready'));
   } catch (error) {
     logger.error('Redis connection failed:', error);
-    if (env.NODE_ENV === 'production') process.exit(1);
+    // Throw an AppError to let the server startup handle the failure gracefully
+    throw new AppError(500, 'Failed to connect to Redis', false, { originalError: error.message });
   }
 }
 

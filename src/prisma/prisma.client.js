@@ -1,6 +1,8 @@
+// src/prisma/prisma.client.js - Revised with AppError for Connection Failures
 import { PrismaClient } from '@prisma/client';
 import { env } from '../config/env.config.js';
 import logger from '../middleware/logger.middleware.js';
+import { AppError } from '../middleware/error.middleware.js';
 
 class PrismaManager {
   static instance = null;
@@ -62,7 +64,8 @@ class PrismaManager {
       }
 
       logger.error('Max retries reached. Exiting...');
-      throw error;
+      // Wrap the original error in an AppError
+      throw new AppError(500, 'Failed to connect to the database after multiple attempts', false, { originalError: error.message });
     }
   }
 
