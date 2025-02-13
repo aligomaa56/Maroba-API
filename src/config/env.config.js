@@ -9,6 +9,7 @@ export const env = {
   BACKEND_URL: process.env.BACKEND_URL || 'http://localhost:3000',
   NODE_ENV: process.env.NODE_ENV || 'development',
   PORT: process.env.PORT || 3000,
+  DISABLE_SERVER_LISTEN: process.env.DISABLE_SERVER_LISTEN === 'true',
 
   // PostgreSQL
   POSTGRESQL_URI: process.env.POSTGRESQL_URI,

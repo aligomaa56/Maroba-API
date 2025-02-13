@@ -7,9 +7,10 @@ import { connectDatabase, disconnectDatabase } from './prisma/prisma.client.js';
 import { connectRedis, disconnectRedis } from './config/redis.config.js';
 
 if (process.env.VERCEL) {
-  logger.info('🦄 Vercel environment detected - exporting handler');
-  module.exports.handler = app;
-  process.exit(0); // Exit immediately after exporting handler
+  logger.info('🦄 Vercel environment detected - preparing serverless handler');
+  // Serverless functions shouldn't start listening
+  isServerListening = true; 
+  global.__serverStarted = true;
 }
 
 if (!global.__serverStarted) {
@@ -100,4 +101,4 @@ const startServer = async () => {
 // Start the application
 startServer();
 
-export default server;
+export { app, server };
