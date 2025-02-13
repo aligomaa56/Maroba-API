@@ -1,4 +1,4 @@
-// src/config/redis.config.js - Revised for Improved Error Handling
+// src/config/redis.config.js - Revised for Improved Connection Reliability
 import { createClient } from 'redis';
 import { env } from './env.config.js';
 import logger from '../middleware/logger.middleware.js';
@@ -34,9 +34,11 @@ const getRedisConfig = () => {
     url: env.REDIS_URL,
     socket: {
       // Use the REDIS_TLS env variable to decide whether to use TLS.
-      tls: env.REDIS_TLS === 'true',
-      // If TLS is used, you might want to reject unauthorized certificates
-      rejectUnauthorized: env.REDIS_TLS === 'true' ? false : undefined,
+      tls: env.REDIS_TLS === 'true' || env.REDIS_TLS === true,
+      // If TLS is used, optionally disable certificate validation
+      rejectUnauthorized: env.REDIS_TLS === true ? false : undefined,
+      // Increase the connection timeout (in milliseconds)
+      connectTimeout: 10000, // 10 seconds
       reconnectStrategy: (retries) => Math.min(retries * 100, 5000),
     },
     password: env.REDIS_PASSWORD,
