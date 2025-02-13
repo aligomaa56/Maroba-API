@@ -6,6 +6,10 @@ import logger from './middleware/logger.middleware.js';
 import { connectDatabase, disconnectDatabase } from './prisma/prisma.client.js';
 import { connectRedis, disconnectRedis } from './config/redis.config.js';
 
+if (!global.__serverStarted) {
+  global.__serverStarted = false;
+}
+
 const PORT = env.PORT || 3000;
 const server = createServer(app);
 let isServerListening = false;

@@ -33,8 +33,10 @@ const getRedisConfig = () => {
   return {
     url: env.REDIS_URL,
     socket: {
-      tls: true,
-      rejectUnauthorized: false,
+      // Use the REDIS_TLS env variable to decide whether to use TLS.
+      tls: env.REDIS_TLS === 'true',
+      // If TLS is used, you might want to reject unauthorized certificates
+      rejectUnauthorized: env.REDIS_TLS === 'true' ? false : undefined,
       reconnectStrategy: (retries) => Math.min(retries * 100, 5000),
     },
     password: env.REDIS_PASSWORD,
