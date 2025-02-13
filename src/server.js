@@ -1,4 +1,3 @@
-// server.js
 import app from './app.js';
 import { env } from './config/env.config.js';
 import { createServer } from 'http';
@@ -8,82 +7,71 @@ import { connectRedis, disconnectRedis } from './config/redis.config.js';
 
 const httpServer = createServer(app);
 const PORT = env.PORT || 3000;
+let isServerListening = false; // Prevent multiple listens
 
-// Enhanced graceful shutdown handler
 const shutdown = async (signal) => {
-  logger.info(`🛑 Received ${signal}, initiating shutdown...`);
+  logger.info(`🛑 Shutting down (${signal})...`);
 
   try {
     await Promise.all([
-      disconnectDatabase().catch(err => logger.error('Database disconnect error:', err)),
-      disconnectRedis().catch(err => logger.error('Redis disconnect error:', err)),
+      disconnectDatabase(),
+      disconnectRedis(),
       new Promise((resolve) => {
-        httpServer.close(resolve);
+        if (isServerListening) {
+          httpServer.close(() => {
+            isServerListening = false;
+            resolve();
+          });
+        } else resolve();
       })
     ]);
-    
-    logger.info('🚫 Server terminated gracefully');
+
+    logger.info('🚫 Server terminated');
     process.exit(0);
   } catch (error) {
-    logger.error('🕛 Forceful shutdown:', error);
+    logger.error('Force shutdown:', error);
     process.exit(1);
   }
 };
 
-// Robust process handling
 const registerProcessHandlers = () => {
-  process.on('uncaughtException', (err) => {
-    logger.error('🚨 Critical Exception:', err);
-    shutdown('UNCAUGHT_EXCEPTION');
-  });
+  const handleException = (err) => {
+    logger.error('Critical error:', err);
+    shutdown('CRASH');
+  };
 
-  process.on('unhandledRejection', (reason) => {
-    logger.error('🚨 Unhandled Rejection:', reason);
-    shutdown('UNHANDLED_REJECTION');
-  });
-
-  ['SIGTERM', 'SIGINT'].forEach(signal => {
-    process.on(signal, () => shutdown(signal));
-  });
+  process.on('uncaughtException', handleException);
+  process.on('unhandledRejection', handleException);
+  ['SIGTERM', 'SIGINT'].forEach(signal => process.on(signal, shutdown));
 };
 
-// Single startup function
 const startServer = async () => {
   try {
     registerProcessHandlers();
 
-    // Sequential service initialization
     logger.info('Connecting to Redis...');
     await connectRedis();
     
     logger.info('Connecting to Database...');
     await connectDatabase();
 
-    // Only start listening after services are connected
-    httpServer.listen(PORT, () => {
-      logger.info(`
-        🚀 Server running in ${env.NODE_ENV} mode
-        📡 Port: ${PORT}
-        🔒 Redis: Connected
-        🗄️  Database: Connected
-      `);
-    });
-
-    httpServer.on('error', (err) => {
-      if (err.code === 'EADDRINUSE') {
-        logger.error(`Port ${PORT} already in use`);
-        shutdown('PORT_CONFLICT');
-      } else {
-        logger.error('💥 Server error:', err);
-      }
-    });
+    if (!isServerListening) {
+      httpServer.listen(PORT, () => {
+        isServerListening = true;
+        logger.info(`
+          🚀 Server running in ${env.NODE_ENV}
+          📡 Port: ${PORT}
+          🔒 Redis: Connected
+          🗄️  Database: Connected
+        `);
+      });
+    }
   } catch (error) {
-    logger.error('🔥 Critical startup failure:', error);
+    logger.error('Startup failed:', error);
     await shutdown('STARTUP_FAILURE');
   }
 };
 
-// Start the application
 startServer();
 
 export default httpServer;

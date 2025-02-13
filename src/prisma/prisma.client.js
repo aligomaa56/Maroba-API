@@ -1,4 +1,3 @@
-// src/prisma/prisma.client.js
 import { PrismaClient } from '@prisma/client';
 import { env } from '../config/env.config.js';
 import logger from '../middleware/logger.middleware.js';
@@ -6,8 +5,8 @@ import logger from '../middleware/logger.middleware.js';
 class PrismaManager {
   static instance = null;
   static isConnected = false;
-  static retryAttempts = 3;
-  static retryDelay = 1000; // 1 second
+  static retryAttempts = 5; // Increased from 3
+  static retryDelay = 2000; // Increased from 1s
 
   static async getInstance() {
     if (!this.instance) {
@@ -18,30 +17,23 @@ class PrismaManager {
         errorFormat: 'minimal',
         datasources: {
           db: {
-            url: env.POSTGRESQL_URI
+            url: `${env.POSTGRESQL_URI}?pgbouncer=true&pool_timeout=15&connection_limit=20`
           }
         }
       });
 
-      // Add query monitoring middleware
+      // Query monitoring middleware
       this.instance.$use(async (params, next) => {
         const start = Date.now();
         try {
           const result = await next(params);
           const duration = Date.now() - start;
-          
           if (duration > 500) {
-            logger.warn(
-              `Slow query (${duration}ms): ${params.model || 'raw'}.${params.action}`,
-              { model: params.model, action: params.action, duration }
-            );
+            logger.warn(`Slow query (${duration}ms): ${params.model || 'raw'}.${params.action}`);
           }
           return result;
         } catch (error) {
-          logger.error(
-            `Database error in ${params.model || 'raw'}.${params.action}`,
-            { error: error.message, query: params.args }
-          );
+          logger.error(`Database error in ${params.model || 'raw'}.${params.action}`, error);
           throw error;
         }
       });
@@ -58,21 +50,19 @@ class PrismaManager {
       this.isConnected = true;
       logger.info('Database connection established');
 
-      // Simple connection test
-      if (env.NODE_ENV === 'production') {
-        await client.$executeRaw`SELECT 1`;
-      }
+      // Connection test
+      await client.$executeRaw`SELECT 1`;
     } catch (error) {
-      logger.error(`Database connection attempt ${attempts + 1} failed:`, error);
+      logger.error(`Connection attempt ${attempts + 1} failed: ${error.message}`);
 
       if (attempts < this.retryAttempts) {
-        logger.info(`Retrying connection in ${this.retryDelay}ms...`);
+        logger.info(`Retrying in ${this.retryDelay}ms...`);
         await new Promise(resolve => setTimeout(resolve, this.retryDelay));
         return this.connect(attempts + 1);
       }
 
-      logger.error('Max connection retries reached. Exiting...');
-      process.exit(1);
+      logger.error('Max retries reached. Exiting...');
+      throw error;
     }
   }
 
@@ -82,36 +72,22 @@ class PrismaManager {
     try {
       await this.instance.$disconnect();
       this.isConnected = false;
-      this.instance = null;
+      this.instance = null; // Reset instance
       logger.info('Database connection closed');
     } catch (error) {
-      logger.error('Error closing database connection:', error);
-      throw error;
-    }
-  }
-
-  static async executeWithRetry(operation, attempts = 0) {
-    try {
-      return await operation();
-    } catch (error) {
-      if (error.code === 'P1017' && attempts < this.retryAttempts) {
-        logger.warn(`Connection pool timeout, retrying operation (${attempts + 1}/${this.retryAttempts})`);
-        await new Promise(resolve => setTimeout(resolve, this.retryDelay));
-        return this.executeWithRetry(operation, attempts + 1);
-      }
+      logger.error('Disconnection error:', error);
       throw error;
     }
   }
 }
 
-// Graceful shutdown handling
+// Graceful shutdown
 const shutdownHandler = async (signal) => {
   logger.info(`Received ${signal}, shutting down...`);
   await PrismaManager.disconnect();
   process.exit(0);
 };
 
-// Register shutdown handlers
 ['SIGTERM', 'SIGINT', 'SIGUSR2'].forEach(signal => {
   process.once(signal, () => shutdownHandler(signal));
 });
