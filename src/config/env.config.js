@@ -4,21 +4,20 @@ dotenv.config();
 
 export const env = {
   // General config
-  APP_NAME: process.env.APP_NAME || 'Maroba API',
+  APP_NAME: process.env.APP_NAME,
   BASE_URL: process.env.BASE_URL,
-  BACKEND_URL: process.env.BACKEND_URL || 'http://localhost:3000',
-  NODE_ENV: process.env.NODE_ENV || 'development',
+  BACKEND_URL: process.env.BACKEND_URL,
+  NODE_ENV: process.env.NODE_ENV,
   PORT: process.env.PORT || 3000,
-  DISABLE_SERVER_LISTEN: process.env.DISABLE_SERVER_LISTEN === 'true',
 
   // PostgreSQL
-  POSTGRESQL_URI: process.env.POSTGRESQL_URI,
+  DATABASE_URL: process.env.DATABASE_URL,
 
   // JWT
-  JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '1h',
-  REFRESH_TOKEN_EXPIRY: process.env.REFRESH_TOKEN_EXPIRY || '7d',
-  JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET || '',
-  JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET || '',
+  JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN,
+  REFRESH_TOKEN_EXPIRY: process.env.REFRESH_TOKEN_EXPIRY,
+  JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET,
+  JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET,
 
   // For production (Gmail)
   EMAIL_USER: process.env.EMAIL_USER,
@@ -26,22 +25,14 @@ export const env = {
 
   // For development (Mailosaur)
   MAILOSAUR_SMTP_HOST: process.env.MAILOSAUR_SMTP_HOST,
-  MAILOSAUR_SMTP_PORT: parseInt(process.env.MAILOSAUR_SMTP_PORT || '25', 10),
-  MAILOSAUR_SMTP_SECURE: process.env.MAILOSAUR_SMTP_SECURE === 'true',
+  MAILOSAUR_SMTP_PORT: parseInt(process.env.MAILOSAUR_SMTP_PORT),
+  MAILOSAUR_SMTP_SECURE: process.env.MAILOSAUR_SMTP_SECURE,
   MAILOSAUR_USER: process.env.MAILOSAUR_USER,
   MAILOSAUR_PASSWORD: process.env.MAILOSAUR_PASSWORD,
   MAILOSAUR_SENDER_EMAIL: process.env.MAILOSAUR_SENDER_EMAIL,
 
-  // Redis
-  REDIS_URL: process.env.REDIS_URL,
-  REDIS_PASSWORD: process.env.REDIS_PASSWORD || '',
-  REDIS_TLS: process.env.REDIS_TLS || 'false',
-
-  // Cache
-  CACHE_TTL: parseInt(process.env.CACHE_TTL || '300', 10),
-
   // Rate Limiting
-  RATE_LIMIT_OVERRIDES: process.env.RATE_LIMIT_OVERRIDES || '',
+  RATE_LIMIT_OVERRIDES: process.env.RATE_LIMIT_OVERRIDES,
 
   // Google OAuth2
   GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,

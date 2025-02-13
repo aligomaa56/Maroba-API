@@ -6,7 +6,6 @@ import fs from 'fs/promises';
 import handlebars from 'handlebars';
 import { AppError } from '../middleware/error.middleware.js';
 import { fileURLToPath } from 'url';
-import { redisClient } from '../config/redis.config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -127,16 +126,6 @@ class NotificationService {
 
         const info = await this.transporter.sendMail(mailOptions);
         logger.info(`Email sent to ${options.to} (${info.messageId})`);
-
-        if (redisClient.isOpen) {
-          await redisClient.set(
-            `notification:sent:${options.to}:${options.template}`,
-            info.messageId,
-            {
-              EX: 3600,
-            }
-          );
-        }
 
         return {
           success: true,

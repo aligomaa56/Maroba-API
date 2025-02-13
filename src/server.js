@@ -1,53 +1,35 @@
-// src/server.js - Revised Startup with Single Listen Invocation
+// server.js - Updated with robust startup sequence
 import app from './app.js';
 import { env } from './config/env.config.js';
 import { createServer } from 'http';
 import logger from './middleware/logger.middleware.js';
 import { connectDatabase, disconnectDatabase } from './prisma/prisma.client.js';
-import { connectRedis, disconnectRedis } from './config/redis.config.js';
 
-if (process.env.VERCEL) {
-  logger.info('🦄 Vercel environment detected - preparing serverless handler');
-  // Serverless functions shouldn't start listening
-  isServerListening = true; 
-  global.__serverStarted = true;
-}
-
-if (!global.__serverStarted) {
-  global.__serverStarted = false;
-}
-
+const httpServer = createServer(app);
 const PORT = env.PORT || 3000;
-const server = createServer(app);
-let isServerListening = false;
 
 // Graceful shutdown handler
 const shutdown = async (signal) => {
   logger.info(`🛑 Received ${signal}, shutting down...`);
-  
+
   try {
     await disconnectDatabase();
     logger.info('🔌 Database connection closed');
   } catch (dbError) {
     logger.error('🚨 Database shutdown error:', dbError);
   }
-  
+
   try {
-    await disconnectRedis();
     logger.info('🔴 Redis connection closed');
   } catch (redisError) {
     logger.error('🚨 Redis shutdown error:', redisError);
   }
-  
-  if (isServerListening) {
-    server.close(() => {
-      logger.info('🚫 HTTP server closed');
-      process.exit(0);
-    });
-  } else {
+
+  httpServer.close(() => {
+    logger.info('🚫 HTTP server closed');
     process.exit(0);
-  }
-  
+  });
+
   // Force exit after 10 seconds
   setTimeout(() => {
     logger.error('🕛 Shutdown timeout forced exit');
@@ -73,25 +55,17 @@ const registerProcessHandlers = () => {
 // Main server startup
 const startServer = async () => {
   try {
-    if (global.__serverStarted) {
-      logger.warn('Server already initialized');
-      return;
-    }
-
     registerProcessHandlers();
-    await Promise.all([connectRedis(), connectDatabase()]);
 
-    if (!process.env.VERCEL && !isServerListening) {
-      server.listen(PORT, () => {
-        global.__serverStarted = true;
-        isServerListening = true;
-        logger.info(`
-          🚀 Server running in ${env.NODE_ENV} mode on port ${PORT}
-          🔒 Redis: ${env.REDIS_URL ? 'Connected' : 'Disabled'}
-          🗄️  Database: ${env.POSTGRESQL_URI ? 'Connected' : 'Disabled'}
-        `);
-      });
-    }
+    // Initialize core services
+    await Promise.all([connectDatabase()]);
+
+    // Start server
+    httpServer.listen(PORT, () => {
+      logger.info(
+        `🚀 Server running in ${env.NODE_ENV} mode on port ${env.PORT}`
+      );
+    });
   } catch (error) {
     logger.error('🔥 Critical startup failure:', error);
     await shutdown('STARTUP_FAILURE');
@@ -101,4 +75,4 @@ const startServer = async () => {
 // Start the application
 startServer();
 
-export { app, server };
+export default httpServer;

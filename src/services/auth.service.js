@@ -5,7 +5,6 @@ import { AppError } from '../middleware/error.middleware.js';
 import { notificationService } from './notification.service.js';
 import crypto from 'crypto';
 import { UserRole } from '../utils/constants.js';
-import { CacheService } from './cache.service.js'; // now using the CacheService for Redis operations
 import logger from '../middleware/logger.middleware.js';
 import { OAuth2Client } from 'google-auth-library';
 
@@ -174,8 +173,6 @@ class AuthService {
   async logout(refreshToken) {
     try {
       const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
-      // Use CacheService (which is integrated with Redis) to blacklist the token.
-      await CacheService.set(`blacklist:${decoded.jti}`, 'true', 60 * 60 * 24 * 7);
       logger.info(`Logged out token with jti: ${decoded.jti}`);
     } catch (error) {
       logger.error('Logout failed:', error);
@@ -191,11 +188,6 @@ class AuthService {
     } catch (error) {
       logger.error('Refresh token verification failed:', error);
       throw new AppError(401, 'Invalid refresh token');
-    }
-    const isBlacklisted = await CacheService.exists(`blacklist:${decoded.jti}`);
-    if (isBlacklisted) {
-      logger.warn(`Refresh token revoked: ${decoded.jti}`);
-      throw new AppError(401, 'Token revoked');
     }
     logger.info(`Refreshing tokens for user: ${decoded.userId}`);
     return this.generateTokens(decoded.userId, decoded.role);
@@ -261,7 +253,6 @@ class AuthService {
       prisma.refreshToken.deleteMany({ where: { userId: user.id } }),
     ]);
 
-    await CacheService.delete(`user:${user.id}:tokens`);
     logger.info(`Password reset successful for user: ${user.email}`);
   }
 
@@ -289,7 +280,6 @@ class AuthService {
       prisma.refreshToken.deleteMany({ where: { userId } }),
     ]);
 
-    await CacheService.delete(`user:${userId}:tokens`);
     logger.info(`Password updated successfully for user: ${userId}`);
   }
 

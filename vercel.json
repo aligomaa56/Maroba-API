@@ -2,14 +2,14 @@
     "version": 2,
     "builds": [
       {
-        "src": "vercel-adapter.cjs",
+        "src": "src/server.js",
         "use": "@vercel/node"
       }
     ],
     "routes": [
       {
         "src": "/(.*)",
-        "dest": "vercel-adapter.cjs"
+        "dest": "src/server.js"
       }
     ]
   }

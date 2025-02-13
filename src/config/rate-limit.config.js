@@ -1,6 +1,4 @@
 import rateLimit from 'express-rate-limit';
-import RedisStore from 'rate-limit-redis';
-import { redisClient } from './redis.config.js';
 import { env } from './env.config.js';
 import logger from '../middleware/logger.middleware.js';
 
@@ -10,14 +8,6 @@ export const RouteType = {
   PUBLIC: 'PUBLIC',
 };
 
-const createRedisStore = (routeType) => {
-  return redisClient?.isOpen
-    ? new RedisStore({
-        client: redisClient,
-        prefix: `rate_limit:${routeType}:`,
-      })
-    : undefined;
-};
 
 const getRateLimitOptions = (routeType) => {
   const options = {
@@ -49,7 +39,6 @@ export const createRateLimiter = (routeType) => {
 
   return rateLimit({
     ...options,
-    store: createRedisStore(routeType),
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => `${req.ip}-${routeType}`,
