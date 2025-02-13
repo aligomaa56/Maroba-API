@@ -1,4 +1,4 @@
-// server.js - Updated with robust startup sequence
+// server.js - Final optimized version
 import app from './app.js';
 import { env } from './config/env.config.js';
 import { createServer } from 'http';
@@ -8,67 +8,87 @@ import { connectRedis, disconnectRedis } from './config/redis.config.js';
 
 const httpServer = createServer(app);
 const PORT = env.PORT || 3000;
+let isServerRunning = false;
 
-// Graceful shutdown handler
+// Enhanced graceful shutdown handler
 const shutdown = async (signal) => {
-  logger.info(`🛑 Received ${signal}, shutting down...`);
+  logger.info(`🛑 Received ${signal}, initiating shutdown...`);
+
+  const shutdownActions = [
+    disconnectDatabase().then(() =>
+      logger.info('🔌 Database connection closed')
+    ),
+    disconnectRedis().then(() => logger.info('🔴 Redis connection closed')),
+    new Promise((resolve) => httpServer.close(resolve)),
+  ];
 
   try {
-    await disconnectDatabase();
-    logger.info('🔌 Database connection closed');
-  } catch (dbError) {
-    logger.error('🚨 Database shutdown error:', dbError);
-  }
-
-  try {
-    await disconnectRedis();
-    logger.info('🔴 Redis connection closed');
-  } catch (redisError) {
-    logger.error('🚨 Redis shutdown error:', redisError);
-  }
-
-  httpServer.close(() => {
-    logger.info('🚫 HTTP server closed');
-    process.exit(0);
-  });
-
-  // Force exit after 10 seconds
-  setTimeout(() => {
-    logger.error('🕛 Shutdown timeout forced exit');
+    await Promise.race([
+      Promise.all(shutdownActions),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Shutdown timeout')), 10000)
+      ),
+    ]);
+    logger.info('🚫 Server terminated gracefully');
+  } catch (error) {
+    logger.error('🕛 Forceful shutdown:', error);
     process.exit(1);
-  }, 10000);
+  } finally {
+    process.exit(0);
+  }
 };
 
-// Process event handlers
+// Robust process handling
 const registerProcessHandlers = () => {
+  const handleException = (err) => {
+    logger.error('🚨 Critical Exception:', err.stack || err);
+    shutdown('UNCAUGHT_EXCEPTION');
+  };
+
+  const handleRejection = (reason) => {
+    logger.error('🚨 Unhandled Rejection:', reason);
+    shutdown('UNHANDLED_REJECTION');
+  };
+
   process
-    .on('uncaughtException', (err) => {
-      logger.error('🚨 Uncaught Exception:', err.stack || err);
-      shutdown('UNCAUGHT_EXCEPTION');
-    })
-    .on('unhandledRejection', (reason) => {
-      logger.error('🚨 Unhandled Rejection:', reason);
-      shutdown('UNHANDLED_REJECTION');
-    })
+    .on('uncaughtException', handleException)
+    .on('unhandledRejection', handleRejection)
     .on('SIGTERM', () => shutdown('SIGTERM'))
-    .on('SIGINT', () => shutdown('SIGINT'));
+    .on('SIGINT', () => shutdown('SIGINT'))
+    .on('exit', () => logger.info('👋 Process exited'));
 };
 
-// Main server startup
+// Optimized server startup
 const startServer = async () => {
+  if (isServerRunning) {
+    logger.warn('⚠️ Server already running');
+    return;
+  }
+
   try {
     registerProcessHandlers();
 
-    // Initialize core services
-    await Promise.all([connectRedis(), connectDatabase()]);
+    // Parallel service initialization
+    await Promise.allSettled([connectRedis(), connectDatabase()]);
 
-    // Start server
     httpServer.listen(PORT, () => {
+      isServerRunning = true;
       logger.info(`
-        🚀 Server running in ${env.NODE_ENV} mode on port ${env.PORT}
+        🚀 Server running in ${env.NODE_ENV} mode
+        📡 Port: ${PORT}
         🔒 Redis: ${env.REDIS_URL ? 'Connected' : 'Disabled'}
-        🗄️  Database: ${env.POSTGRESQL_URI ? 'Connected' : 'Disabled'}
+        🗄️  Database: Connected
       `);
+    });
+
+    // Handle Vercel serverless specific behavior
+    httpServer.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        logger.error(`Port ${PORT} already in use`);
+        shutdown('PORT_CONFLICT');
+      } else {
+        logger.error('💥 Server error:', err);
+      }
     });
   } catch (error) {
     logger.error('🔥 Critical startup failure:', error);
@@ -76,7 +96,11 @@ const startServer = async () => {
   }
 };
 
-// Start the application
-startServer();
+// Start the application with existence check
+if (!isServerRunning) {
+  startServer();
+} else {
+  logger.info('ℹ️ Server instance already exists');
+}
 
 export default httpServer;

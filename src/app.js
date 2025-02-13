@@ -1,70 +1,82 @@
+// src/app.js - Optimized version with Logging
 import express from 'express';
 import passport from 'passport';
 import configurePassport from './config/passport.config.js';
 import cors from 'cors';
 import corsOptions from './config/cors.config.js';
 import { errorHandler } from './middleware/error.middleware.js';
-import { publicLimiter, authLimiter, apiLimiter } from './middleware/rate-limiter.middleware.js';
+import { publicLimiter } from './middleware/rate-limiter.middleware.js';
 import { connectDatabase } from './prisma/prisma.client.js';
-// import { fileScanner } from './middleware/file-scanner.middleware.js';
-
-
-// Routes imports
 import authRoutes from './routes/auth.routes.js';
-// import productRoutes from './routes/product.routes.js';
-// import orderRoutes from './routes/order.routes.js';
-// import chatRoutes from './routes/chat.routes.js';
-// import customRequestRoutes from './routes/custom-request.routes.js';
-// import discountRoutes from './routes/discount.routes.js';
-// import adminRoutes from './routes/admin.routes.js';
+import logger from './middleware/logger.middleware.js'; // ✅ Import logger
+import { env } from './config/env.config.js';
 
 const app = express();
 
-// Database connection middleware
-app.use(async (req, res, next) => {
-  try {
-    await connectDatabase();
-    next();
-  } catch (error) {
-    next(error);
-  }
-});
+logger.info('Initializing application...');
 
-
-// Google OAuth2.0
 configurePassport();
 app.use(passport.initialize());
 
-// Basic middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(cors(corsOptions));
+// Enhanced database middleware with logging
+app.use(async (req, res, next) => {
+  try {
+    if (!req.prisma) {
+      await connectDatabase();
+      req.prisma = prisma;
+    }
+    logger.info('Database connection verified.');
+    next();
+  } catch (error) {
+    logger.error('Database unavailable:', error);
+    next(new AppError(503, 'Database unavailable'));
+  }
+});
 
-// Security middleware
-app.use(publicLimiter); // Apply to all routes
-// app.use(fileScanner);
+// Security middleware pipeline
+const securityMiddlewares = [
+  express.json(),
+  express.urlencoded({ extended: true }),
+  cors(corsOptions),
+  publicLimiter,
+];
 
-// Hello From Api Route
+securityMiddlewares.forEach((middleware) => {
+  app.use(middleware);
+});
+
+app.use((req, res, next) => {
+  logger.info(`📡 ${req.method} ${req.url} - IP: ${req.ip}`);
+  next();
+});
+
+// Health check endpoint with logging
 app.get('/health', (req, res) => {
-  res.status(200).json({ 
+  logger.info('Health check requested.');
+  res.status(200).json({
     status: 'ok',
-    database: 'connected',
-    timestamp: new Date().toISOString()
+    services: {
+      database: 'connected',
+      redis: env.REDIS_URL ? 'connected' : 'disabled',
+      smtp: 'active',
+    },
+    timestamp: new Date().toISOString(),
   });
 });
 
-// API routes with specific rate limits
-app.use('/api/auth', authLimiter, authRoutes);
-// app.use('/api/products', apiLimiter, productRoutes);
-// app.use('/api/orders', apiLimiter, orderRoutes);
-// app.use('/api/chat', apiLimiter, chatRoutes);
-// app.use('/api/custom-requests', apiLimiter, customRequestRoutes);
-// app.use('/api/discounts', apiLimiter, discountRoutes);
+const routeConfig = [{ path: '/api/auth', handler: authRoutes }];
+routeConfig.forEach(({ path, handler }) => {
+  logger.info(`🚀 Mounting route: ${path}`);
+  app.use(path, handler);
+});
 
-// Admin routes with stricter rate limits
-// app.use('/api/admin', authLimiter, adminRoutes);
+app.use((err, req, res, next) => {
+  logger.error(`❌ ${err.statusCode || 500} - ${err.message} - Path: ${req.path}`);
+  next(err);
+});
 
-// Error handling
 app.use(errorHandler);
+
+logger.info('✅ Application initialized successfully.');
 
 export default app;

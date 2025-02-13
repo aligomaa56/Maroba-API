@@ -3,48 +3,61 @@ import { PrismaClient } from '@prisma/client';
 import { env } from '../config/env.config.js';
 import logger from '../middleware/logger.middleware.js';
 
-const prisma = global.prisma || new PrismaClient({
-  log: env.NODE_ENV === 'development' 
-    ? ['info', 'warn', 'error']
-    : ['warn', 'error'],
-  errorFormat: 'minimal',
-  datasources: {
-    db: {
-      url: env.POSTGRESQL_URI,
+// Initialize Prisma client
+const prisma =
+  global.prisma ||
+  new PrismaClient({
+    log:
+      env.NODE_ENV === 'development'
+        ? ['info', 'warn', 'error']
+        : ['warn', 'error'],
+    errorFormat: 'minimal',
+    datasources: {
+      db: {
+        url: env.POSTGRESQL_URI,
+      },
     },
-  },
-});
+  });
 
+// Prevent multiple Prisma clients in development
 if (env.NODE_ENV === 'development') {
   global.prisma = prisma;
 }
 
+// Middleware for logging slow queries
 prisma.$use(async (params, next) => {
   const start = Date.now();
   try {
     const result = await next(params);
     const duration = Date.now() - start;
 
-    // If it's a raw query (model is undefined), optionally ignore or use a different threshold.
     if (params.model === undefined && params.action === 'executeRaw') {
-      // Optionally log at a different threshold, e.g., only log if over 2000ms:
       if (duration > 2000) {
-        logger.warn(`Slow raw query (${duration}ms): ${params.action}`, { action: params.action, duration });
+        logger.warn(`Slow raw query (${duration}ms): ${params.action}`, {
+          action: params.action,
+          duration,
+        });
       }
     } else if (duration > 500) {
-      logger.warn(`Slow query (${duration}ms): ${params.model}.${params.action}`, {
-        model: params.model,
-        action: params.action,
-        duration,
-      });
+      logger.warn(
+        `Slow query (${duration}ms): ${params.model}.${params.action}`,
+        {
+          model: params.model,
+          action: params.action,
+          duration,
+        }
+      );
     }
 
     return result;
   } catch (error) {
-    logger.error(`Database error in ${params.model || 'raw'}.${params.action}`, {
-      error: error.message,
-      query: params.args,
-    });
+    logger.error(
+      `Database error in ${params.model || 'raw'}.${params.action}`,
+      {
+        error: error.message,
+        query: params.args,
+      }
+    );
     throw error;
   }
 });
@@ -52,20 +65,15 @@ prisma.$use(async (params, next) => {
 let isConnected = false;
 
 const connectDatabase = async () => {
-  if (isConnected) return;
-  
+  if (isConnected) return; // ✅ Prevent duplicate connections
+
   try {
     await prisma.$connect();
     isConnected = true;
     logger.info('Database connection established');
 
     if (env.NODE_ENV === 'production') {
-      await prisma.$transaction([
-        prisma.$executeRaw`SET lock_timeout = 10000`,
-        prisma.$executeRaw`SET idle_in_transaction_session_timeout = 15000`,
-        prisma.$executeRaw`SET statement_timeout = 15000`
-      ]);
-      logger.debug('Applied production database timeouts');
+      await prisma.$executeRaw`SELECT 1`; // Warmup query
     }
   } catch (error) {
     logger.error('Database connection failed:', error);
@@ -74,8 +82,8 @@ const connectDatabase = async () => {
 };
 
 const disconnectDatabase = async () => {
-  if (!isConnected) return;
-  
+  if (!isConnected) return; // ✅ Prevent duplicate disconnections
+
   try {
     await prisma.$disconnect();
     isConnected = false;
@@ -86,6 +94,7 @@ const disconnectDatabase = async () => {
   }
 };
 
+// Graceful shutdown handling
 const shutdownHandler = async (signal) => {
   logger.info(`Received ${signal}, shutting down...`);
   await disconnectDatabase();
@@ -95,21 +104,5 @@ const shutdownHandler = async (signal) => {
 process.once('SIGTERM', shutdownHandler.bind(null, 'SIGTERM'));
 process.once('SIGINT', shutdownHandler.bind(null, 'SIGINT'));
 process.once('SIGUSR2', shutdownHandler.bind(null, 'SIGUSR2'));
-
-// const HEALTH_CHECK_INTERVAL = env.NODE_ENV === 'production' ? 30000 : 60000;
-
-// const healthCheck = setInterval(async () => {
-//   if (!isConnected) return;
-  
-//   try {
-//     await prisma.$queryRaw`SELECT 1`;
-//   } catch (error) {
-//     logger.error('Database connection health check failed:', error);
-//     isConnected = false;
-//     clearInterval(healthCheck);
-//     await disconnectDatabase();
-//     setTimeout(connectDatabase, 5000);
-//   }
-// }, HEALTH_CHECK_INTERVAL);
 
 export { prisma, connectDatabase, disconnectDatabase };

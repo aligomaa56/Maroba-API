@@ -1,19 +1,15 @@
-// src/services/cache.service.js
 import { redisClient } from '../config/redis.config.js';
 import logger from '../middleware/logger.middleware.js';
 
 export class CacheService {
   static async get(key) {
-    if (!this.#isConnected()) {
-      return null;
-    }
+    if (!this.#isConnected()) return null;
 
     try {
-      const value = await redisClient.get(key);
-      return value;
+      return await redisClient.get(key);
     } catch (error) {
       this.#handleError('get', error);
-      throw error;
+      return null;
     }
   }
 
@@ -25,7 +21,6 @@ export class CacheService {
       await redisClient.set(key, value, options);
     } catch (error) {
       this.#handleError('set', error);
-      throw error;
     }
   }
 
@@ -36,18 +31,6 @@ export class CacheService {
       await redisClient.del(key);
     } catch (error) {
       this.#handleError('delete', error);
-      throw error;
-    }
-  }
-
-  static async flush() {
-    if (!this.#isConnected()) return;
-
-    try {
-      await redisClient.flushAll();
-    } catch (error) {
-      this.#handleError('flush', error);
-      throw error;
     }
   }
 
@@ -59,18 +42,21 @@ export class CacheService {
       return result === 1;
     } catch (error) {
       this.#handleError('exists', error);
-      throw error;
+      return false;
     }
   }
 
-  static async ttl(key) {
-    if (!this.#isConnected()) return -2;
-
+  static async getWithFallback(key, fallback, ttl = 3600) {
     try {
-      return await redisClient.ttl(key);
+      const cached = await this.get(key);
+      if (cached) return JSON.parse(cached);
+      
+      const data = await fallback();
+      await this.set(key, JSON.stringify(data), ttl);
+      return data;
     } catch (error) {
-      this.#handleError('ttl', error);
-      throw error;
+      logger.warn(`Cache fallback triggered: ${error.message}`);
+      return fallback();
     }
   }
 
