@@ -1,4 +1,4 @@
-// server.js - Final optimized version
+// server.js
 import app from './app.js';
 import { env } from './config/env.config.js';
 import { createServer } from 'http';
@@ -8,80 +8,67 @@ import { connectRedis, disconnectRedis } from './config/redis.config.js';
 
 const httpServer = createServer(app);
 const PORT = env.PORT || 3000;
-let isServerRunning = false;
 
 // Enhanced graceful shutdown handler
 const shutdown = async (signal) => {
   logger.info(`🛑 Received ${signal}, initiating shutdown...`);
 
-  const shutdownActions = [
-    disconnectDatabase().then(() =>
-      logger.info('🔌 Database connection closed')
-    ),
-    disconnectRedis().then(() => logger.info('🔴 Redis connection closed')),
-    new Promise((resolve) => httpServer.close(resolve)),
-  ];
-
   try {
-    await Promise.race([
-      Promise.all(shutdownActions),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Shutdown timeout')), 10000)
-      ),
+    await Promise.all([
+      disconnectDatabase().catch(err => logger.error('Database disconnect error:', err)),
+      disconnectRedis().catch(err => logger.error('Redis disconnect error:', err)),
+      new Promise((resolve) => {
+        httpServer.close(resolve);
+      })
     ]);
+    
     logger.info('🚫 Server terminated gracefully');
+    process.exit(0);
   } catch (error) {
     logger.error('🕛 Forceful shutdown:', error);
     process.exit(1);
-  } finally {
-    process.exit(0);
   }
 };
 
 // Robust process handling
 const registerProcessHandlers = () => {
-  const handleException = (err) => {
-    logger.error('🚨 Critical Exception:', err.stack || err);
+  process.on('uncaughtException', (err) => {
+    logger.error('🚨 Critical Exception:', err);
     shutdown('UNCAUGHT_EXCEPTION');
-  };
+  });
 
-  const handleRejection = (reason) => {
+  process.on('unhandledRejection', (reason) => {
     logger.error('🚨 Unhandled Rejection:', reason);
     shutdown('UNHANDLED_REJECTION');
-  };
+  });
 
-  process
-    .on('uncaughtException', handleException)
-    .on('unhandledRejection', handleRejection)
-    .on('SIGTERM', () => shutdown('SIGTERM'))
-    .on('SIGINT', () => shutdown('SIGINT'))
-    .on('exit', () => logger.info('👋 Process exited'));
+  ['SIGTERM', 'SIGINT'].forEach(signal => {
+    process.on(signal, () => shutdown(signal));
+  });
 };
 
-// Optimized server startup
+// Single startup function
 const startServer = async () => {
-  if (isServerRunning) {
-    logger.warn('⚠️ Server already running');
-    return;
-  }
-
   try {
     registerProcessHandlers();
 
-    // Parallel service initialization
-    await Promise.allSettled([connectRedis(), connectDatabase()]);
+    // Sequential service initialization
+    logger.info('Connecting to Redis...');
+    await connectRedis();
+    
+    logger.info('Connecting to Database...');
+    await connectDatabase();
 
+    // Only start listening after services are connected
     httpServer.listen(PORT, () => {
-      isServerRunning = true;
       logger.info(`
         🚀 Server running in ${env.NODE_ENV} mode
         📡 Port: ${PORT}
-        🔒 Redis: ${env.REDIS_URL ? 'Connected' : 'Disabled'}
+        🔒 Redis: Connected
         🗄️  Database: Connected
       `);
     });
 
-    // Handle Vercel serverless specific behavior
     httpServer.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
         logger.error(`Port ${PORT} already in use`);
@@ -96,11 +83,7 @@ const startServer = async () => {
   }
 };
 
-// Start the application with existence check
-if (!isServerRunning) {
-  startServer();
-} else {
-  logger.info('ℹ️ Server instance already exists');
-}
+// Start the application
+startServer();
 
 export default httpServer;

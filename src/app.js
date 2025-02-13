@@ -10,6 +10,7 @@ import { connectDatabase } from './prisma/prisma.client.js';
 import authRoutes from './routes/auth.routes.js';
 import logger from './middleware/logger.middleware.js'; // ✅ Import logger
 import { env } from './config/env.config.js';
+import { prisma } from './prisma/prisma.client.js';
 
 const app = express();
 
