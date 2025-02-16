@@ -4,7 +4,7 @@ import { env } from './config/env.config.js';
 import { createServer } from 'http';
 import logger from './middleware/logger.middleware.js';
 import { connectDatabase, disconnectDatabase } from './prisma/prisma.client.js';
-import { authService } from './services/auth.service.js';
+// import { authService } from './services/auth.service.js';
 
 const httpServer = createServer(app);
 const PORT = env.PORT || 3000;
@@ -58,10 +58,10 @@ const startServer = async () => {
     await connectDatabase();
     
     // Start token cleanup scheduler
-    setInterval(() => {
-      authService.cleanExpiredTokens()
-        .catch(error => logger.error('Scheduled token cleanup failed:', error));
-    }, 3600000); // Every hour
+    // setInterval(() => {
+    //   authService.cleanExpiredTokens()
+    //     .catch(error => logger.error('Scheduled token cleanup failed:', error));
+    // }, 3600000); // Every hour
 
     httpServer.listen(PORT, () => {
       logger.info(`🚀 Server running in ${env.NODE_ENV} mode on port ${PORT}`);
