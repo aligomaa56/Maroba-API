@@ -1,54 +1,100 @@
-// src/prisma/prisma.client.js - Optimized for Serverless
+// src/prisma/prisma.client.js - Revised with AppError for Connection Failures
 import { PrismaClient } from '@prisma/client';
 import { env } from '../config/env.config.js';
 import logger from '../middleware/logger.middleware.js';
-
-// Global instance for serverless reuse
-const globalPrisma = globalThis.__prisma || undefined;
+import { AppError } from '../middleware/error.middleware.js';
 
 class PrismaManager {
-  static instance = globalPrisma || new PrismaClient({
-    log: env.NODE_ENV === 'development' 
-      ? ['info', 'warn', 'error'] 
-      : ['warn', 'error'],
-    datasources: {
-      db: {
-        url: `${env.DATABASE_URL}?pgbouncer=true&pool_timeout=30&connection_limit=5`
-      }
-    }
-  });
+  static instance = null;
+  static isConnected = false;
+  static retryAttempts = 5; // Increased from 3
+  static retryDelay = 2000; // Increased from 1s
 
-  static async connect() {
-    if (this.instance.$isConnected) return;
+  static async getInstance() {
+    if (!this.instance) {
+      this.instance = new PrismaClient({
+        log: env.NODE_ENV === 'development' 
+          ? ['info', 'warn', 'error'] 
+          : ['warn', 'error'],
+        errorFormat: 'minimal',
+        datasources: {
+          db: {
+            url: `${env.DATABASE_URL}?pgbouncer=true&pool_timeout=30&connection_limit=5`
+          }
+        }
+      });
+
+      // Query monitoring middleware
+      this.instance.$use(async (params, next) => {
+        const start = Date.now();
+        try {
+          const result = await next(params);
+          const duration = Date.now() - start;
+          if (duration > 500) {
+            logger.warn(`Slow query (${duration}ms): ${params.model || 'raw'}.${params.action}`);
+          }
+          return result;
+        } catch (error) {
+          logger.error(`Database error in ${params.model || 'raw'}.${params.action}`, error);
+          throw error;
+        }
+      });
+    }
+    return this.instance;
+  }
+
+  static async connect(attempts = 0) {
+    if (this.isConnected) return;
 
     try {
-      await this.instance.$connect();
+      const client = await this.getInstance();
+      await client.$connect();
+      this.isConnected = true;
       logger.info('Database connection established');
-      
-      // Store in global for serverless reuse
-      if (env.NODE_ENV === 'production') {
-        globalThis.__prisma = this.instance;
-      }
+
+      // Connection test
+      await client.$executeRaw`SELECT 1`;
     } catch (error) {
-      logger.error('Connection failed:', error);
-      await this.instance.$disconnect();
-      throw error;
+      logger.error(`Connection attempt ${attempts + 1} failed: ${error.message}`);
+
+      if (attempts < this.retryAttempts) {
+        logger.info(`Retrying in ${this.retryDelay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, this.retryDelay));
+        return this.connect(attempts + 1);
+      }
+
+      logger.error('Max retries reached. Exiting...');
+      // Wrap the original error in an AppError
+      throw new AppError(500, 'Failed to connect to the database after multiple attempts', false, { originalError: error.message });
     }
   }
 
   static async disconnect() {
-    if (!this.instance.$isConnected) return;
-    
-    await this.instance.$disconnect();
-    logger.info('Database connection closed');
+    if (!this.isConnected || !this.instance) return;
+
+    try {
+      await this.instance.$disconnect();
+      this.isConnected = false;
+      this.instance = null; // Reset instance
+      logger.info('Database connection closed');
+    } catch (error) {
+      logger.error('Disconnection error:', error);
+      throw error;
+    }
   }
 }
 
-// Serverless connection handling
-if (env.NODE_ENV === 'production') {
-  PrismaManager.connect().catch(() => process.exit(1));
-}
+// Graceful shutdown
+const shutdownHandler = async (signal) => {
+  logger.info(`Received ${signal}, shutting down...`);
+  await PrismaManager.disconnect();
+  process.exit(0);
+};
 
-export const prisma = PrismaManager.instance;
+['SIGTERM', 'SIGINT', 'SIGUSR2'].forEach(signal => {
+  process.once(signal, () => shutdownHandler(signal));
+});
+
+export const prisma = await PrismaManager.getInstance();
 export const connectDatabase = () => PrismaManager.connect();
 export const disconnectDatabase = () => PrismaManager.disconnect();
