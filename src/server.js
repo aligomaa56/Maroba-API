@@ -4,33 +4,31 @@ import { env } from './config/env.config.js';
 import { createServer } from 'http';
 import logger from './middleware/logger.middleware.js';
 import { connectDatabase, disconnectDatabase } from './prisma/prisma.client.js';
+import { authService } from './services/auth.service.js';
 
 const httpServer = createServer(app);
 const PORT = env.PORT || 3000;
+let isShuttingDown = false;
 
 // Graceful shutdown handler
 const shutdown = async (signal) => {
-  logger.info(`🛑 Received ${signal}, shutting down...`);
+  if (isShuttingDown) return;
+  isShuttingDown = true;
 
-  try {
-    await disconnectDatabase();
-    logger.info('🔌 Database connection closed');
-  } catch (dbError) {
-    logger.error('🚨 Database shutdown error:', dbError);
-  }
+  logger.info(`🛑 Received ${signal}, initiating graceful shutdown...`);
 
-  try {
-    logger.info('🔴 Redis connection closed');
-  } catch (redisError) {
-    logger.error('🚨 Redis shutdown error:', redisError);
-  }
+  const shutdownActions = [
+    disconnectDatabase().catch(error => logger.error('Database shutdown error:', error)),
+    authService.cleanExpiredTokens().catch(error => logger.error('Token cleanup error:', error)),
+  ];
+
+  await Promise.allSettled(shutdownActions);
 
   httpServer.close(() => {
     logger.info('🚫 HTTP server closed');
     process.exit(0);
   });
 
-  // Force exit after 10 seconds
   setTimeout(() => {
     logger.error('🕛 Shutdown timeout forced exit');
     process.exit(1);
@@ -39,15 +37,14 @@ const shutdown = async (signal) => {
 
 // Process event handlers
 const registerProcessHandlers = () => {
+  const handleException = (err) => {
+    logger.error('🚨 Critical error:', err.stack || err);
+    shutdown('CRITICAL_ERROR');
+  };
+
   process
-    .on('uncaughtException', (err) => {
-      logger.error('🚨 Uncaught Exception:', err.stack || err);
-      shutdown('UNCAUGHT_EXCEPTION');
-    })
-    .on('unhandledRejection', (reason) => {
-      logger.error('🚨 Unhandled Rejection:', reason);
-      shutdown('UNHANDLED_REJECTION');
-    })
+    .on('uncaughtException', handleException)
+    .on('unhandledRejection', handleException)
     .on('SIGTERM', () => shutdown('SIGTERM'))
     .on('SIGINT', () => shutdown('SIGINT'));
 };
@@ -57,17 +54,20 @@ const startServer = async () => {
   try {
     registerProcessHandlers();
 
-    // Initialize core services
-    await Promise.all([connectDatabase()]);
+    // Single database connection
+    await connectDatabase();
+    
+    // Start token cleanup scheduler
+    setInterval(() => {
+      authService.cleanExpiredTokens()
+        .catch(error => logger.error('Scheduled token cleanup failed:', error));
+    }, 3600000); // Every hour
 
-    // Start server
     httpServer.listen(PORT, () => {
-      logger.info(
-        `🚀 Server running in ${env.NODE_ENV} mode on port ${env.PORT}`
-      );
+      logger.info(`🚀 Server running in ${env.NODE_ENV} mode on port ${PORT}`);
     });
   } catch (error) {
-    logger.error('🔥 Critical startup failure:', error);
+    logger.error('🔥 Startup failed:', error);
     await shutdown('STARTUP_FAILURE');
   }
 };

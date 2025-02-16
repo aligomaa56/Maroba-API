@@ -11,7 +11,7 @@ router.get('/verify-email', authController.verifyEmail);
 router.post('/forgot-password', authController.forgotPassword);
 router.post('/reset-password', authController.resetPassword);
 router.post('/refresh-token', authController.refreshToken);
-router.post('/logout', authController.logout);
+router.post('/logout',protect, authController.logout);
 // router.post('/google-login', authController.googleLogin);
 router.get('/google', authController.googleAuth);
 router.get('/google/callback', authController.googleAuthCallback);

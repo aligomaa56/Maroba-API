@@ -20,30 +20,27 @@ import authRoutes from './routes/auth.routes.js';
 
 const app = express();
 
-// Google OAuth2.0
+// Pre-configure passport before middleware setup
 configurePassport();
+
+// Essential middleware only
+app.use(express.json({ limit: '10kb' }));
+app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+app.use(cors(corsOptions));
 app.use(passport.initialize());
 
-// Basic middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(cors(corsOptions));
-
 // Security middleware
-app.use(publicLimiter); // Apply to all routes
+app.use(publicLimiter);
 // app.use(fileScanner);
 
-// Hello From Api Route
-app.get('/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'ok',
-    database: 'connected',
-    timestamp: new Date().toISOString()
-  });
-});
+// Health check endpoint
+app.get('/health', (req, res) => res.status(200).json({ 
+  status: 'ok',
+  timestamp: new Date().toISOString()
+}));
 
 // API routes with specific rate limits
-app.use('/api/auth', authLimiter, authRoutes);
+app.use('/api/auth', authRoutes);
 // app.use('/api/products', apiLimiter, productRoutes);
 // app.use('/api/orders', apiLimiter, orderRoutes);
 // app.use('/api/chat', apiLimiter, chatRoutes);

@@ -10,44 +10,59 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Cache for compiled templates
+const templateCache = new Map();
+
 class NotificationService {
   constructor() {
     this.templateDir = path.join(__dirname, '../../email');
     this.initializeTransporter();
+    
+    // Verify connection but don't exit process on failure - just log the error
     this.verifyConnection().catch((error) => {
       logger.error('SMTP initialization failed:', error);
-      process.exit(1);
     });
+    
+    // Pre-load common templates
+    this.preloadTemplates(['welcome', 'verify-email', 'reset-password',]);
   }
 
   initializeTransporter() {
-    if (env.NODE_ENV === 'production') {
-      this.validateProductionConfig();
-      this.transporter = nodemailer.createTransport({
-        service: 'gmail',
-        pool: true,
-        auth: {
-          user: env.EMAIL_USER,
-          pass: env.EMAIL_PASSWORD,
-        },
-        tls: { rejectUnauthorized: false },
-      });
-      this.senderEmail = env.EMAIL_USER;
-    } else {
-      this.validateDevelopmentConfig();
-      this.transporter = nodemailer.createTransport({
-        host: env.MAILOSAUR_SMTP_HOST,
-        port: env.MAILOSAUR_SMTP_PORT,
-        secure: false,
-        auth: {
-          user: env.MAILOSAUR_USER,
-          pass: env.MAILOSAUR_PASSWORD,
-        },
-      });
-      this.senderEmail = env.MAILOSAUR_SENDER_EMAIL;
-    }
+    try {
+      if (env.NODE_ENV === 'production') {
+        this.validateProductionConfig();
+        this.transporter = nodemailer.createTransport({
+          service: 'gmail',
+          pool: true,
+          maxConnections: 5, // Limit parallel connections
+          rateDelta: 1000,    // Minimum time between messages
+          rateLimit: 5,       // Max messages per rateDelta
+          auth: {
+            user: env.EMAIL_USER,
+            pass: env.EMAIL_PASSWORD,
+          },
+          tls: { rejectUnauthorized: false },
+        });
+        this.senderEmail = env.EMAIL_USER;
+      } else {
+        this.validateDevelopmentConfig();
+        this.transporter = nodemailer.createTransport({
+          host: env.MAILOSAUR_SMTP_HOST,
+          port: env.MAILOSAUR_SMTP_PORT,
+          secure: false,
+          auth: {
+            user: env.MAILOSAUR_USER,
+            pass: env.MAILOSAUR_PASSWORD,
+          },
+        });
+        this.senderEmail = env.MAILOSAUR_SENDER_EMAIL;
+      }
 
-    logger.info(`Initialized ${env.NODE_ENV} email transporter`);
+      logger.info(`Initialized ${env.NODE_ENV} email transporter`);
+    } catch (error) {
+      logger.error('Failed to initialize email transporter:', error);
+      throw new AppError(500, 'Email service initialization failed');
+    }
   }
 
   validateProductionConfig() {
@@ -67,6 +82,7 @@ class NotificationService {
   validateDevelopmentConfig() {
     const required = [
       'MAILOSAUR_SMTP_HOST',
+      'MAILOSAUR_SMTP_PORT',
       'MAILOSAUR_SENDER_EMAIL',
       'MAILOSAUR_USER',
       'MAILOSAUR_PASSWORD',
@@ -89,17 +105,36 @@ class NotificationService {
       logger.info('SMTP connection verified successfully');
     } catch (error) {
       logger.error('SMTP connection verification failed:', error);
-      throw new AppError(500, 'Failed to verify SMTP connection');
+      // Don't throw here, just log the error
+    }
+  }
+
+  async preloadTemplates(templateNames) {
+    try {
+      const promises = templateNames.map(name => this.loadTemplate(name));
+      await Promise.all(promises);
+      logger.info(`Preloaded ${templateNames.length} email templates`);
+    } catch (error) {
+      logger.warn('Failed to preload some email templates:', error);
     }
   }
 
   async loadTemplate(templateName) {
+    // Return cached template if available
+    if (templateCache.has(templateName)) {
+      return templateCache.get(templateName);
+    }
+
     try {
       const templatePath = path.join(this.templateDir, `${templateName}.hbs`);
       const source = await fs.readFile(templatePath, 'utf-8');
-      return handlebars.compile(source);
+      const compiledTemplate = handlebars.compile(source);
+      
+      // Cache the compiled template
+      templateCache.set(templateName, compiledTemplate);
+      return compiledTemplate;
     } catch (error) {
-      logger.error('Template loading failed:', error);
+      logger.error(`Template loading failed for "${templateName}":`, error);
       throw new AppError(500, `Failed to load template: ${templateName}`);
     }
   }
@@ -122,6 +157,11 @@ class NotificationService {
             from: this.senderEmail,
             to: options.to,
           },
+          // Add optional CC and BCC if provided
+          ...(options.cc && { cc: options.cc }),
+          ...(options.bcc && { bcc: options.bcc }),
+          // Add attachments if provided
+          ...(options.attachments && { attachments: options.attachments }),
         };
 
         const info = await this.transporter.sendMail(mailOptions);
@@ -130,6 +170,7 @@ class NotificationService {
         return {
           success: true,
           messageId: info.messageId,
+          response: info.response,
         };
       } catch (error) {
         attempt++;
@@ -148,12 +189,13 @@ class NotificationService {
           });
         }
 
-        await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+        // Exponential backoff
+        await new Promise((resolve) => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
       }
     }
   }
 
-  // Keep existing notification methods unchanged
+  // Notification methods
   async sendWelcomeNotification(email, username, req) {
     return this.sendEmail({
       to: email,
@@ -163,6 +205,7 @@ class NotificationService {
         appName: env.APP_NAME || 'Our Service',
         username,
         loginLink: `${req.protocol}://${req.get('host')}/api/auth/login`,
+        currentYear: new Date().getFullYear(), // For copyright in footer
       },
     });
   }
@@ -179,6 +222,8 @@ class NotificationService {
       context: {
         appName: env.APP_NAME || 'Our Service',
         verificationLink,
+        expiryHours: 24, // This should match your actual token expiry
+        currentYear: new Date().getFullYear(),
       },
     });
   }
@@ -195,6 +240,8 @@ class NotificationService {
       context: {
         appName: env.APP_NAME || 'Our Service',
         resetLink,
+        expiryHours: 1, // This should match your actual token expiry
+        currentYear: new Date().getFullYear(),
       },
     });
   }
@@ -202,13 +249,34 @@ class NotificationService {
   async sendOrderConfirmationNotification(email, orderDetails) {
     return this.sendEmail({
       to: email,
-      subject: 'Order Confirmation',
+      subject: `Order Confirmation #${orderDetails.orderNumber || ''}`,
       template: 'order-confirmation',
       context: {
         appName: env.APP_NAME || 'Our Service',
         ...orderDetails,
+        currentYear: new Date().getFullYear(),
       },
     });
+  }
+
+  // New method for generic notifications
+  async sendGenericNotification(email, subject, template, context) {
+    return this.sendEmail({
+      to: email,
+      subject,
+      template,
+      context: {
+        appName: env.APP_NAME || 'Our Service',
+        currentYear: new Date().getFullYear(),
+        ...context,
+      },
+    });
+  }
+  
+  // Method to clear template cache (useful for testing or template updates)
+  clearTemplateCache() {
+    templateCache.clear();
+    logger.info('Email template cache cleared');
   }
 }
 
