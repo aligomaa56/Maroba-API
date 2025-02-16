@@ -19,7 +19,7 @@ class PrismaManager {
         errorFormat: 'minimal',
         datasources: {
           db: {
-            url: `${env.DATABASE_URL}?pgbouncer=true&pool_timeout=30&connection_limit=5`
+            url: `${env.DATABASE_URL}?pgbouncer=true&pool_timeout=30&connection_limit=20`
           }
         }
       });
