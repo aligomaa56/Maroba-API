@@ -1,4 +1,3 @@
-// src/prisma/prisma.client.js - Revised with AppError for Connection Failures
 import { PrismaClient } from '@prisma/client';
 import { env } from '../config/env.config.js';
 import logger from '../middleware/logger.middleware.js';
@@ -6,12 +5,21 @@ import { AppError } from '../middleware/error.middleware.js';
 
 class PrismaManager {
   static instance = null;
+  static isConnecting = false;
   static isConnected = false;
-  static retryAttempts = 5; // Increased from 3
-  static retryDelay = 2000; // Increased from 1s
+  static retryAttempts = 5;
+  static retryDelay = 2000;
+  static connectionTimeout = 30000; // 30 seconds timeout
 
   static async getInstance() {
     if (!this.instance) {
+      const connectionString = new URL(env.DATABASE_URL);
+      // Add connection pool parameters to URL
+      connectionString.searchParams.set('pgbouncer', 'true');
+      connectionString.searchParams.set('connection_limit', '10');  // Reduced from 20
+      connectionString.searchParams.set('pool_timeout', '20');      // Increased from 15
+      connectionString.searchParams.set('connect_timeout', '10');   // Added explicit connect timeout
+
       this.instance = new PrismaClient({
         log: env.NODE_ENV === 'development' 
           ? ['info', 'warn', 'error'] 
@@ -19,23 +27,48 @@ class PrismaManager {
         errorFormat: 'minimal',
         datasources: {
           db: {
-            url: `${env.DATABASE_URL}?pgbouncer=true&pool_timeout=30&connection_limit=20`
+            url: connectionString.toString()
+          }
+        },
+        // Add connection handling settings
+        __internal: {
+          engine: {
+            connectionTimeout: this.connectionTimeout,
+            pollInterval: 100  // Poll interval for connection status
           }
         }
       });
 
-      // Query monitoring middleware
+      // Enhanced query monitoring middleware
       this.instance.$use(async (params, next) => {
         const start = Date.now();
+        const queryInfo = `${params.model || 'raw'}.${params.action}`;
+        
         try {
-          const result = await next(params);
+          const result = await Promise.race([
+            next(params),
+            new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('Query timeout')), 10000)
+            )
+          ]);
+
           const duration = Date.now() - start;
           if (duration > 500) {
-            logger.warn(`Slow query (${duration}ms): ${params.model || 'raw'}.${params.action}`);
+            logger.warn(`Slow query (${duration}ms): ${queryInfo}`, {
+              duration,
+              query: queryInfo,
+              args: params.args
+            });
           }
           return result;
         } catch (error) {
-          logger.error(`Database error in ${params.model || 'raw'}.${params.action}`, error);
+          const duration = Date.now() - start;
+          logger.error(`Database error in ${queryInfo}`, {
+            error: error.message,
+            duration,
+            query: queryInfo,
+            args: params.args
+          });
           throw error;
         }
       });
@@ -45,27 +78,50 @@ class PrismaManager {
 
   static async connect(attempts = 0) {
     if (this.isConnected) return;
+    if (this.isConnecting) {
+      logger.warn('Connection attempt already in progress');
+      return;
+    }
+
+    this.isConnecting = true;
 
     try {
       const client = await this.getInstance();
-      await client.$connect();
-      this.isConnected = true;
-      logger.info('Database connection established');
+      
+      // Test connection with timeout
+      const connectionPromise = Promise.race([
+        client.$connect(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Connection timeout')), this.connectionTimeout)
+        )
+      ]);
 
-      // Connection test
+      await connectionPromise;
+      
+      // Verify connection with a test query
       await client.$executeRaw`SELECT 1`;
+      
+      this.isConnected = true;
+      this.isConnecting = false;
+      logger.info('Database connection established');
     } catch (error) {
+      this.isConnecting = false;
       logger.error(`Connection attempt ${attempts + 1} failed: ${error.message}`);
 
       if (attempts < this.retryAttempts) {
-        logger.info(`Retrying in ${this.retryDelay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, this.retryDelay));
+        const delay = Math.min(this.retryDelay * Math.pow(2, attempts), 30000); // Exponential backoff with max 30s
+        logger.info(`Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
         return this.connect(attempts + 1);
       }
 
       logger.error('Max retries reached. Exiting...');
-      // Wrap the original error in an AppError
-      throw new AppError(500, 'Failed to connect to the database after multiple attempts', false, { originalError: error.message });
+      throw new AppError(
+        500, 
+        'Database connection failed after multiple attempts', 
+        false, 
+        { originalError: error.message }
+      );
     }
   }
 
@@ -73,24 +129,55 @@ class PrismaManager {
     if (!this.isConnected || !this.instance) return;
 
     try {
-      await this.instance.$disconnect();
+      // Add timeout to disconnect operation
+      await Promise.race([
+        this.instance.$disconnect(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Disconnect timeout')), 5000)
+        )
+      ]);
+      
       this.isConnected = false;
-      this.instance = null; // Reset instance
+      this.isConnecting = false;
+      this.instance = null;
       logger.info('Database connection closed');
     } catch (error) {
       logger.error('Disconnection error:', error);
+      // Force disconnect on error
+      this.instance = null;
+      this.isConnected = false;
+      this.isConnecting = false;
       throw error;
     }
   }
+
+  // Add connection reset method
+  static async resetConnection() {
+    logger.info('Resetting database connection...');
+    await this.disconnect();
+    await this.connect();
+  }
 }
 
-// Graceful shutdown
+// Enhanced shutdown handler with timeout
 const shutdownHandler = async (signal) => {
-  logger.info(`Received ${signal}, shutting down...`);
-  await PrismaManager.disconnect();
-  process.exit(0);
+  logger.info(`Received ${signal}, initiating graceful shutdown...`);
+  
+  try {
+    await Promise.race([
+      PrismaManager.disconnect(),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Shutdown timeout')), 10000)
+      )
+    ]);
+    process.exit(0);
+  } catch (error) {
+    logger.error('Forced shutdown due to timeout:', error);
+    process.exit(1);
+  }
 };
 
+// Register shutdown handlers
 ['SIGTERM', 'SIGINT', 'SIGUSR2'].forEach(signal => {
   process.once(signal, () => shutdownHandler(signal));
 });
@@ -98,3 +185,4 @@ const shutdownHandler = async (signal) => {
 export const prisma = await PrismaManager.getInstance();
 export const connectDatabase = () => PrismaManager.connect();
 export const disconnectDatabase = () => PrismaManager.disconnect();
+export const resetDatabaseConnection = () => PrismaManager.resetConnection();

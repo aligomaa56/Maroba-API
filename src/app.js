@@ -50,6 +50,23 @@ app.use('/api/auth', authRoutes);
 // Admin routes with stricter rate limits
 // app.use('/api/admin', authLimiter, adminRoutes);
 
+app.use(async (err, req, res, next) => {
+  if (err.message && err.message.includes('database') || err.message.includes('prisma')) {
+    logger.error('Database error in request:', err);
+    
+    // Attempt to reset database connection
+    try {
+      await resetDatabaseConnection();
+      // Retry the original request
+      return next();
+    } catch (resetError) {
+      logger.error('Database reset failed:', resetError);
+      return next(err);
+    }
+  }
+  next(err);
+});
+
 // Error handling
 app.use(errorHandler);
 
