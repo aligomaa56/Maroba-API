@@ -31,22 +31,4 @@ const corsOptions = {
   optionsSuccessStatus: 204,
 };
 
-// Separate options for WebSocket CORS
-export const wsOptions = {
-  origin: (origin, callback) => {
-    if (!origin || env.NODE_ENV === 'development') {
-      callback(null, true);
-      return;
-    }
-
-    if (whitelist.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  methods: ['GET', 'POST'],
-  credentials: true,
-};
-
 export default corsOptions;

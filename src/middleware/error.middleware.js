@@ -1,4 +1,3 @@
-// src/middleware/error.middleware.js
 import { env } from '../config/env.config.js';
 import logger from './logger.middleware.js';
 import { ZodError } from 'zod';

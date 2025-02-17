@@ -1,8 +1,8 @@
 import { authService } from '../services/auth.service.js';
 import catchAsync from '../utils/catchAsync.js';
 import { AppError } from '../middleware/error.middleware.js';
-import passport from 'passport';
-import logger from '../middleware/logger.middleware.js';
+// import passport from 'passport';
+// import logger from '../middleware/logger.middleware.js';
 
 
 export const login = catchAsync(async (req, res, next) => {
@@ -121,52 +121,52 @@ export const verifyEmail = catchAsync(async (req, res, next) => {
   });
 });
 
-export const googleAuth = catchAsync(async (req, res, next) => {
-  // Validate and sanitize redirectUrl
-  let redirectUrl = req.query.redirect || '';
+// export const googleAuth = catchAsync(async (req, res, next) => {
+//   // Validate and sanitize redirectUrl
+//   let redirectUrl = req.query.redirect || '';
   
-  // Only allow relative URLs or URLs to trusted domains
-  if (redirectUrl && !redirectUrl.startsWith('/') && !redirectUrl.startsWith(process.env.FRONTEND_URL)) {
-    logger.warn(`Suspicious redirect URL blocked: ${redirectUrl}`);
-    redirectUrl = '/';
-  }
+//   // Only allow relative URLs or URLs to trusted domains
+//   if (redirectUrl && !redirectUrl.startsWith('/') && !redirectUrl.startsWith(process.env.FRONTEND_URL)) {
+//     logger.warn(`Suspicious redirect URL blocked: ${redirectUrl}`);
+//     redirectUrl = '/';
+//   }
   
-  passport.authenticate('google', {
-    session: false,
-    state: JSON.stringify({ redirectUrl })
-  })(req, res, next);
-});
+//   passport.authenticate('google', {
+//     session: false,
+//     state: JSON.stringify({ redirectUrl })
+//   })(req, res, next);
+// });
 
-export const googleAuthCallback = catchAsync(async (req, res, next) => {
-  passport.authenticate('google', { session: false }, async (error, user) => {
-    if (error || !user) {
-      logger.error('Google authentication failed:', error);
-      const state = JSON.parse(req.query.state || '{}');
-      const redirectUrl = state.redirectUrl || '/api/auth/login';
-      return res.redirect(`${redirectUrl}?error=authentication_failed`);
-    }
+// export const googleAuthCallback = catchAsync(async (req, res, next) => {
+//   passport.authenticate('google', { session: false }, async (error, user) => {
+//     if (error || !user) {
+//       logger.error('Google authentication failed:', error);
+//       const state = JSON.parse(req.query.state || '{}');
+//       const redirectUrl = state.redirectUrl || '/api/auth/login';
+//       return res.redirect(`${redirectUrl}?error=authentication_failed`);
+//     }
 
-    const tokens = await authService.generateTokens(user.id, user.role);
+//     const tokens = await authService.generateTokens(user.id, user.role);
     
-    // Parse state with error handling
-    let redirectUrl = '/';
-    try {
-      const state = JSON.parse(req.query.state || '{}');
-      redirectUrl = state.redirectUrl || process.env.FRONTEND_URL || '/';
+//     // Parse state with error handling
+//     let redirectUrl = '/';
+//     try {
+//       const state = JSON.parse(req.query.state || '{}');
+//       redirectUrl = state.redirectUrl || process.env.FRONTEND_URL || '/';
       
-      // Additional security check
-      if (!redirectUrl.startsWith('/') && !redirectUrl.startsWith(process.env.FRONTEND_URL)) {
-        logger.warn(`Suspicious redirect URL blocked: ${redirectUrl}`);
-        redirectUrl = process.env.FRONTEND_URL || '/';
-      }
-    } catch (e) {
-      logger.error('Error parsing state:', e);
-    }
+//       // Additional security check
+//       if (!redirectUrl.startsWith('/') && !redirectUrl.startsWith(process.env.FRONTEND_URL)) {
+//         logger.warn(`Suspicious redirect URL blocked: ${redirectUrl}`);
+//         redirectUrl = process.env.FRONTEND_URL || '/';
+//       }
+//     } catch (e) {
+//       logger.error('Error parsing state:', e);
+//     }
 
-    // URI encode tokens for safety
-    const encodedAccessToken = encodeURIComponent(tokens.accessToken);
-    const encodedRefreshToken = encodeURIComponent(tokens.refreshToken);
+//     // URI encode tokens for safety
+//     const encodedAccessToken = encodeURIComponent(tokens.accessToken);
+//     const encodedRefreshToken = encodeURIComponent(tokens.refreshToken);
     
-    res.redirect(`${redirectUrl}?access_token=${encodedAccessToken}&refresh_token=${encodedRefreshToken}`);
-  })(req, res, next);
-});
+//     res.redirect(`${redirectUrl}?access_token=${encodedAccessToken}&refresh_token=${encodedRefreshToken}`);
+//   })(req, res, next);
+// });

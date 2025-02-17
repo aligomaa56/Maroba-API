@@ -8,7 +8,6 @@ export const RouteType = {
   PUBLIC: 'PUBLIC',
 };
 
-
 const getRateLimitOptions = (routeType) => {
   const options = {
     authentication: {

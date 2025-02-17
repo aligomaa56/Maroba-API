@@ -32,7 +32,7 @@ export const env = {
   MAILOSAUR_SENDER_EMAIL: process.env.MAILOSAUR_SENDER_EMAIL,
 
   // Rate Limiting
-  RATE_LIMIT_OVERRIDES: process.env.RATE_LIMIT_OVERRIDES,
+  // RATE_LIMIT_OVERRIDES: process.env.RATE_LIMIT_OVERRIDES,
 
   // Google OAuth2
   GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,

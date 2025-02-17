@@ -9,16 +9,16 @@ class PrismaManager {
   static isConnected = false;
   static retryAttempts = 5;
   static retryDelay = 2000;
-  static connectionTimeout = 30000; // 30 seconds timeout
+  static connectionTimeout = 30000;
 
   static async getInstance() {
     if (!this.instance) {
       const connectionString = new URL(env.DATABASE_URL);
       // Add connection pool parameters to URL
       connectionString.searchParams.set('pgbouncer', 'true');
-      connectionString.searchParams.set('connection_limit', '10');  // Reduced from 20
-      connectionString.searchParams.set('pool_timeout', '20');      // Increased from 15
-      connectionString.searchParams.set('connect_timeout', '10');   // Added explicit connect timeout
+      connectionString.searchParams.set('connection_limit', '10');
+      connectionString.searchParams.set('pool_timeout', '20');
+      connectionString.searchParams.set('connect_timeout', '10');
 
       this.instance = new PrismaClient({
         log: env.NODE_ENV === 'development' 
@@ -39,7 +39,6 @@ class PrismaManager {
         }
       });
 
-      // Enhanced query monitoring middleware
       this.instance.$use(async (params, next) => {
         const start = Date.now();
         const queryInfo = `${params.model || 'raw'}.${params.action}`;

@@ -1,11 +1,10 @@
 import express from 'express';
 import passport from 'passport';
-import configurePassport from './config/passport.config.js';
+// import configurePassport from './config/passport.config.js';
 import cors from 'cors';
 import corsOptions from './config/cors.config.js';
 import { errorHandler } from './middleware/error.middleware.js';
 import { publicLimiter, authLimiter, apiLimiter } from './middleware/rate-limiter.middleware.js';
-import { connectDatabase } from './prisma/prisma.client.js';
 // import { fileScanner } from './middleware/file-scanner.middleware.js';
 
 
@@ -21,7 +20,7 @@ import authRoutes from './routes/auth.routes.js';
 const app = express();
 
 // Pre-configure passport before middleware setup
-configurePassport();
+// configurePassport();
 
 // Essential middleware only
 app.use(express.json({ limit: '10kb' }));
@@ -40,7 +39,7 @@ app.get('/health', (req, res) => res.status(200).json({
 }));
 
 // API routes with specific rate limits
-app.use('/api/auth', authRoutes);
+app.use('/api/auth',authLimiter, authRoutes);
 // app.use('/api/products', apiLimiter, productRoutes);
 // app.use('/api/orders', apiLimiter, orderRoutes);
 // app.use('/api/chat', apiLimiter, chatRoutes);

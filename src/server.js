@@ -1,4 +1,3 @@
-// server.js
 import app from './app.js';
 import { env } from './config/env.config.js';
 import { createServer } from 'http';
@@ -182,5 +181,4 @@ serverInstance.start().catch(error => {
   logger.error('Failed to start server:', error);
 });
 
-// Export the singleton instance
 export default serverInstance.httpServer;

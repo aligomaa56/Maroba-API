@@ -6,42 +6,21 @@ import { notificationService } from './notification.service.js';
 import crypto from 'crypto';
 import { UserRole } from '../utils/constants.js';
 import logger from '../middleware/logger.middleware.js';
-import { OAuth2Client } from 'google-auth-library';
+import { parseExpiration } from '../utils/parseExpiration.js';
+import { hashPassword } from '../utils/hashPassword.js';
 
-// Add constant for password reset token expiry
-const PASSWORD_RESET_EXPIRES_IN = 60 * 60 * 1000; // 60 minutes
-const EMAIL_VERIFICATION_EXPIRES_IN = 24 * 60 * 60 * 1000; // 24 hours
+// import { OAuth2Client } from 'google-auth-library';
 
-// Cache parsed expiration values for performance
+const PASSWORD_RESET_EXPIRES_IN = 60 * 60 * 1000;
+const EMAIL_VERIFICATION_EXPIRES_IN = 24 * 60 * 60 * 1000;
+
 const parsedJwtExpiration = parseExpiration(process.env.JWT_EXPIRES_IN);
-const parsedRefreshExpiration = parseExpiration(process.env.REFRESH_TOKEN_EXPIRY);
-
-function parseExpiration(expiration) {
-  const units = {
-    s: 1000,
-    m: 60 * 1000,
-    h: 60 * 60 * 1000,
-    d: 24 * 60 * 60 * 1000,
-  };
-
-  const match = expiration.match(/^(\d+)([smhd])$/);
-  if (!match) {
-    throw new Error(`Invalid expiration format: ${expiration}`);
-  }
-
-  const value = parseInt(match[1], 10);
-  const unit = match[2];
-
-  return value * units[unit];
-}
-
-// Helper function for password hashing
-async function hashPassword(password) {
-  return await bcrypt.hash(password, 12);
-}
+const parsedRefreshExpiration = parseExpiration(
+  process.env.REFRESH_TOKEN_EXPIRY
+);
 
 class AuthService {
-  // Register a new user
+
   async register(email, username, password, req) {
     logger.info(`Attempting registration for email: ${email}`);
 
@@ -54,7 +33,10 @@ class AuthService {
 
     if (existingUser) {
       logger.warn(`Registration failed: Email or username already taken`);
-      throw new AppError(400, 'Registration failed: Email or username already taken');
+      throw new AppError(
+        400,
+        'Registration failed: Email or username already taken'
+      );
     }
 
     // Hash the password.
@@ -62,7 +44,10 @@ class AuthService {
 
     // Generate a verification token.
     const rawToken = crypto.randomBytes(32).toString('hex');
-    const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const hashedToken = crypto
+      .createHash('sha256')
+      .update(rawToken)
+      .digest('hex');
 
     // Create the user with default properties.
     const newUser = await prisma.user.create({
@@ -75,26 +60,31 @@ class AuthService {
         isVerified: false,
         role: UserRole.USER,
         verificationToken: hashedToken,
-        verificationTokenExpires: new Date(Date.now() + EMAIL_VERIFICATION_EXPIRES_IN),
+        verificationTokenExpires: new Date(
+          Date.now() + EMAIL_VERIFICATION_EXPIRES_IN
+        ),
       },
     });
 
     // Send verification email with the raw (unencrypted) token.
-    await notificationService.sendVerificationNotification(email, rawToken, req);
+    await notificationService.sendVerificationNotification(
+      email,
+      rawToken,
+      req
+    );
 
     logger.info(`User registered successfully: ${email}`);
     return { id: newUser.id, email: newUser.email, username: newUser.username };
   }
 
-  // Login using email/username and password.
   async login(identifier, password, ip) {
     if (!identifier || !password) {
       logger.warn(`Login attempt with missing credentials from IP: ${ip}`);
       throw new AppError(400, 'Both identifier and password are required');
     }
-  
+
     logger.info(`Login attempt for identifier: ${identifier} from IP: ${ip}`);
-  
+
     const user = await prisma.user.findFirst({
       where: {
         OR: [{ email: identifier }, { username: identifier }],
@@ -110,18 +100,18 @@ class AuthService {
         username: true,
       },
     });
-  
+
     try {
       this.validateLoginAttempt(user, ip);
       await this.verifyPassword(user.password, password);
-  
+
       // *** Single Session Enforcement ***
       // Check if the user already has an active session.
       const activeSession = await prisma.refreshToken.findFirst({
         where: {
           userId: user.id,
-          expiresAt: { gt: new Date() }
-        }
+          expiresAt: { gt: new Date() },
+        },
       });
       if (activeSession) {
         throw new AppError(
@@ -129,7 +119,7 @@ class AuthService {
           'User already logged in from another session. Please log out first.'
         );
       }
-  
+
       await this.resetFailedAttempts(user.id);
       const tokens = await this.generateTokens(user.id, user.role);
       logger.info(`Login successful for user: ${user.email}`);
@@ -142,7 +132,6 @@ class AuthService {
     }
   }
 
-  // Verify the email using the token from the URL.
   async verifyEmail(token) {
     if (!token) {
       logger.warn('Email verification attempt without token');
@@ -193,7 +182,6 @@ class AuthService {
     };
   }
 
-  // Logout by blacklisting the refresh token.
   async logout(refreshToken) {
     if (!refreshToken) {
       throw new AppError(400, 'Refresh token is required');
@@ -201,10 +189,10 @@ class AuthService {
 
     try {
       const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
-      
+
       // Delete all refresh tokens for the user
       await prisma.refreshToken.deleteMany({
-        where: { userId: decoded.userId }
+        where: { userId: decoded.userId },
       });
 
       logger.info(`Logged out all sessions for user: ${decoded.userId}`);
@@ -213,7 +201,6 @@ class AuthService {
     }
   }
 
-  // Refresh the access token.
   async refreshToken(refreshToken) {
     if (!refreshToken) {
       throw new AppError(400, 'Refresh token is required');
@@ -229,14 +216,16 @@ class AuthService {
 
     // Check if the token exists in the database
     const storedToken = await prisma.refreshToken.findFirst({
-      where: { 
+      where: {
         token: refreshToken,
-        userId: decoded.userId
-      }
+        userId: decoded.userId,
+      },
     });
 
     if (!storedToken) {
-      logger.warn(`Refresh token not found in database for user: ${decoded.userId}`);
+      logger.warn(
+        `Refresh token not found in database for user: ${decoded.userId}`
+      );
       throw new AppError(401, 'Invalid refresh token');
     }
 
@@ -250,30 +239,32 @@ class AuthService {
     return this.generateTokens(decoded.userId, decoded.role);
   }
 
-  // Initiate the forgot password process.
   async forgotPassword(email, req) {
     if (!email) {
       throw new AppError(400, 'Email is required');
     }
-    
+
     logger.info(`Password reset requested for email: ${email}`);
     const user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
       logger.warn(`Password reset requested for non-existing email: ${email}`);
       return; // Do not reveal whether the email exists
     }
-  
+
     // *** Rate Limiting Password Resets ***
     // If a reset token is already active, do not issue another one.
     if (user.resetPasswordToken && user.resetPasswordExpire > new Date()) {
       logger.warn(`Password reset already requested for email: ${email}`);
       return;
     }
-  
+
     const rawToken = crypto.randomBytes(32).toString('hex');
-    const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const hashedToken = crypto
+      .createHash('sha256')
+      .update(rawToken)
+      .digest('hex');
     const expires = new Date(Date.now() + PASSWORD_RESET_EXPIRES_IN);
-  
+
     await prisma.user.update({
       where: { id: user.id },
       data: {
@@ -281,19 +272,25 @@ class AuthService {
         resetPasswordExpire: expires,
       },
     });
-  
-    await notificationService.sendPasswordResetNotification(email, rawToken, req);
+
+    await notificationService.sendPasswordResetNotification(
+      email,
+      rawToken,
+      req
+    );
     logger.info(`Password reset token sent to email: ${email}`);
   }
 
-  // Complete the password reset process.
   async resetPassword(rawToken, newPassword) {
     logger.info('Resetting password using token');
     if (!rawToken) {
       throw new AppError(400, 'Invalid reset token');
     }
 
-    const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const hashedToken = crypto
+      .createHash('sha256')
+      .update(rawToken)
+      .digest('hex');
     const user = await prisma.user.findFirst({
       where: {
         resetPasswordToken: hashedToken,
@@ -309,7 +306,10 @@ class AuthService {
     // Check that the new password is different from the current one.
     const isSame = await bcrypt.compare(newPassword, user.password);
     if (isSame) {
-      throw new AppError(400, 'New password must be different from the current password');
+      throw new AppError(
+        400,
+        'New password must be different from the current password'
+      );
     }
 
     const hashedPassword = await hashPassword(newPassword);
@@ -329,12 +329,11 @@ class AuthService {
     logger.info(`Password reset successful for user: ${user.email}`);
   }
 
-  // Update the user's password.
   async updatePassword(userId, currentPassword, newPassword) {
     if (!userId || !currentPassword || !newPassword) {
       throw new AppError(400, 'All fields are required');
     }
-    
+
     logger.info(`Updating password for user: ${userId}`);
     const user = await prisma.user.findUnique({
       where: { id: userId },
@@ -351,9 +350,12 @@ class AuthService {
     // Check that the new password is different from the current one.
     const isSame = await bcrypt.compare(newPassword, user.password);
     if (isSame) {
-      throw new AppError(400, 'New password must be different from the current password');
+      throw new AppError(
+        400,
+        'New password must be different from the current password'
+      );
     }
-  
+
     const hashedPassword = await hashPassword(newPassword);
 
     await prisma.$transaction([
@@ -362,7 +364,7 @@ class AuthService {
         data: { password: hashedPassword },
       }),
       prisma.refreshToken.deleteMany({ where: { userId } }),
-    ]);  
+    ]);
 
     logger.info(`Password updated successfully for user: ${userId}`);
   }
@@ -370,59 +372,59 @@ class AuthService {
   // Clean up expired refresh tokens. (Scheduled task)
   async cleanExpiredTokens() {
     await prisma.refreshToken.deleteMany({
-      where: { expiresAt: { lt: new Date() } }
+      where: { expiresAt: { lt: new Date() } },
     });
   }
 
-  async handleGoogleLogin(profile) {
-    if (!profile || !profile.emails || !profile.emails[0]) {
-      throw new AppError(400, 'Invalid Google profile data');
-    }
-    
-    const { id: googleId, displayName, emails, name } = profile;
-    const email = emails[0].value;
-    const firstName = name?.givenName || '';
-    const lastName = name?.familyName || '';
-  
-    let user = await prisma.user.findUnique({ where: { email } });
-  
-    if (user) {
-      if (!user.isGoogleUser) {
-        user = await prisma.user.update({
-          where: { id: user.id },
-          data: {
-            googleId,
-            isGoogleUser: true,
-            isVerified: true,
-          },
-        });
-      }
-    } else {
-      const username = email.split('@')[0];
-      const randomPassword = crypto.randomBytes(16).toString('hex');
-      const hashedPassword = await hashPassword(randomPassword);
-  
-      user = await prisma.user.create({
-        data: {
-          email,
-          username,
-          firstName,
-          lastName,
-          password: hashedPassword,
-          googleId,
-          isGoogleUser: true,
-          isVerified: true,
-          role: UserRole.USER,
-        },
-      });
-    }
-  
-    logger.info(`Google authentication successful for user: ${user.email}`);
-    return user;
-  }  
+  // async handleGoogleLogin(profile) {
+  //   if (!profile || !profile.emails || !profile.emails[0]) {
+  //     throw new AppError(400, 'Invalid Google profile data');
+  //   }
 
-  // --- Helper functions --- //
-  // Generate a new access and refresh token pair.
+  //   const { id: googleId, displayName, emails, name } = profile;
+  //   const email = emails[0].value;
+  //   const firstName = name?.givenName || '';
+  //   const lastName = name?.familyName || '';
+
+  //   let user = await prisma.user.findUnique({ where: { email } });
+
+  //   if (user) {
+  //     if (!user.isGoogleUser) {
+  //       user = await prisma.user.update({
+  //         where: { id: user.id },
+  //         data: {
+  //           googleId,
+  //           isGoogleUser: true,
+  //           isVerified: true,
+  //         },
+  //       });
+  //     }
+  //   } else {
+  //     const username = email.split('@')[0];
+  //     const randomPassword = crypto.randomBytes(16).toString('hex');
+  //     const hashedPassword = await hashPassword(randomPassword);
+
+  //     user = await prisma.user.create({
+  //       data: {
+  //         email,
+  //         username,
+  //         firstName,
+  //         lastName,
+  //         password: hashedPassword,
+  //         googleId,
+  //         isGoogleUser: true,
+  //         isVerified: true,
+  //         role: UserRole.USER,
+  //       },
+  //     });
+  //   }
+
+  //   logger.info(`Google authentication successful for user: ${user.email}`);
+  //   return user;
+  // }
+
+
+
   async generateTokens(userId, role) {
     // Generate a unique token identifier
     const jti = crypto.randomUUID();
@@ -431,7 +433,7 @@ class AuthService {
     const accessTokenPayload = { userId, role, jti };
     const refreshTokenPayload = { userId, role, jti };
 
-    const accessTokenOptions = { expiresIn: parsedJwtExpiration }; 
+    const accessTokenOptions = { expiresIn: parsedJwtExpiration };
     const refreshTokenOptions = { expiresIn: parsedRefreshExpiration };
 
     const accessToken = jwt.sign(
@@ -447,7 +449,7 @@ class AuthService {
 
     // Calculate expiration date once for refresh token
     const expiresAt = new Date(Date.now() + parsedRefreshExpiration);
-    
+
     // Save the refresh token in the database.
     await prisma.refreshToken.create({
       data: {
@@ -461,12 +463,11 @@ class AuthService {
     return { accessToken, refreshToken };
   }
 
-  // Compare a candidate password with the hashed password.
   async verifyPassword(hashedPassword, candidatePassword) {
     if (!hashedPassword || !candidatePassword) {
       throw new AppError(400, 'Password verification failed: Missing data');
     }
-    
+
     const isMatch = await bcrypt.compare(candidatePassword, hashedPassword);
     if (!isMatch) {
       logger.warn('Password verification failed');
@@ -474,7 +475,6 @@ class AuthService {
     }
   }
 
-  // Validate that the login attempt meets basic requirements.
   validateLoginAttempt(user, ip) {
     if (!user) {
       logger.warn(`Invalid credentials from IP: ${ip}`);
@@ -502,7 +502,7 @@ class AuthService {
 
   async handleFailedLoginAttempt(userId, currentAttempts) {
     if (!userId) return;
-    
+
     const attempts = currentAttempts + 1;
     const lockDuration = this.calculateLockDuration(attempts);
 
@@ -527,10 +527,9 @@ class AuthService {
     return null;
   }
 
-  // Reset the failed login attempt counters.
   async resetFailedAttempts(userId) {
     if (!userId) return;
-    
+
     await prisma.user.update({
       where: { id: userId },
       data: {
