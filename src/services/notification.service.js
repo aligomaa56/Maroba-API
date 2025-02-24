@@ -211,9 +211,10 @@ class NotificationService {
   }
 
   async sendVerificationNotification(email, token, req) {
-    const verificationLink = `${req.protocol}://${req.get(
-      'host'
-    )}/api/auth/verify-email?token=${token}`;
+    const verificationLink =  env.CLIENT_URL + `/verify-email?token=${token}`;
+    // const verificationLink = `${req.protocol}://${req.get(
+    //   'host'
+    // )}/api/auth/verify-email?token=${token}`;
 
     return this.sendEmail({
       to: email,

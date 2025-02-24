@@ -7,6 +7,7 @@ export const env = {
   APP_NAME: process.env.APP_NAME,
   BASE_URL: process.env.BASE_URL,
   BACKEND_URL: process.env.BACKEND_URL,
+  CLIENT_URL: process.env.CLIENT_URL,
   NODE_ENV: process.env.NODE_ENV,
   PORT: process.env.PORT || 3000,
 
