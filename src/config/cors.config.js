@@ -3,7 +3,7 @@ import { env } from './env.config.js';
 const whitelist = [
   env.BACKEND_URL,
   env.BASE_URL,
-  // env.CLIENT_URL,
+  env.CLIENT_URL,
 ];
 
 const corsOptions = {
