@@ -55,6 +55,31 @@ const formatError = (err) => {
   return { statusCode, message, details, stack };
 };
 
+// Add error sampling for high-volume errors
+class ErrorSampler {
+  constructor() {
+    this.errorCounts = new Map();
+    // Sample 10% of errors in production
+    this.sampleRate = env.NODE_ENV === 'production' ? 0.1 : 1;
+    this.resetInterval = setInterval(() => this.resetCounts(), 60000);
+  }
+
+  shouldLog(error) {
+    const key = `${error.name}:${error.message}`;
+    const count = (this.errorCounts.get(key) || 0) + 1;
+    this.errorCounts.set(key, count);
+    
+    // Always log first occurrence and sample thereafter
+    return count === 1 || Math.random() < this.sampleRate;
+  }
+
+  resetCounts() {
+    this.errorCounts.clear();
+  }
+}
+
+const errorSampler = new ErrorSampler();
+
 /**
  * Error handler middleware.
  * Supports multiple errors if an array or if err.errors is an array.
@@ -83,12 +108,14 @@ const errorHandler = (err, req, res, _next) => {
   // Determine the overall status code.
   const overallStatusCode = formattedErrors.reduce((acc, curr) => Math.max(acc, curr.statusCode), 0);
 
-  // Log each error.
+  // Log with sampling to prevent log flooding
   formattedErrors.forEach(errorItem => {
-    if (errorItem.statusCode >= 500) {
-      logger.error(errorItem);
-    } else {
-      logger.warn(errorItem);
+    if (errorSampler.shouldLog(errorItem)) {
+      if (errorItem.statusCode >= 500) {
+        logger.error(errorItem);
+      } else {
+        logger.warn(errorItem);
+      }
     }
   });
 
