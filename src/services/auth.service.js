@@ -22,17 +22,6 @@ const parsedRefreshExpiration = parseExpiration(
 class AuthService {
 
   async register(email, username, password, req) {
-    // Add input validation
-    if (!email || !username || !password) {
-      logger.warn('Registration attempted with missing data');
-      throw new AppError(400, 'Email, username, and password are required');
-    }
-
-    if (password.length < 8) {
-      logger.warn('Registration attempted with weak password');
-      throw new AppError(400, 'Password must be at least 8 characters long');
-    }
-
     logger.info(`Attempting registration for email: ${email}`);
 
     // Check if a user with the same email or username exists.
@@ -87,6 +76,7 @@ class AuthService {
     logger.info(`User registered successfully: ${email}`);
     return { id: newUser.id, email: newUser.email, username: newUser.username };
   }
+
 
   async login(identifier, password, ip) {
     if (!identifier || !password) {
