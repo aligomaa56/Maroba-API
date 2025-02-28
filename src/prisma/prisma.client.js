@@ -15,10 +15,12 @@ class PrismaManager {
     if (!this.instance) {
       const connectionString = new URL(env.DATABASE_URL);
       // Add connection pool parameters to URL
-      connectionString.searchParams.set('pgbouncer', 'true');
-      connectionString.searchParams.set('connection_limit', '10');
-      connectionString.searchParams.set('pool_timeout', '20');
-      connectionString.searchParams.set('connect_timeout', '10');
+      connectionString.searchParams.set('pgbouncer', 'true');  // Add PgBouncer support
+      connectionString.searchParams.set('connection_limit', '20');  // Keep higher limit
+      connectionString.searchParams.set('pool_timeout', '30');
+      connectionString.searchParams.set('statement_timeout', '60000');
+      connectionString.searchParams.set('idle_in_transaction_session_timeout', '30000');
+      connectionString.searchParams.set('connect_timeout', '10');  // Add connect timeout
 
       this.instance = new PrismaClient({
         log: env.NODE_ENV === 'development' 
