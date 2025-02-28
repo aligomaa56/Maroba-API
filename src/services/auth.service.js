@@ -22,6 +22,17 @@ const parsedRefreshExpiration = parseExpiration(
 class AuthService {
 
   async register(email, username, password, req) {
+    // Add input validation
+    if (!email || !username || !password) {
+      logger.warn('Registration attempted with missing data');
+      throw new AppError(400, 'Email, username, and password are required');
+    }
+
+    if (password.length < 8) {
+      logger.warn('Registration attempted with weak password');
+      throw new AppError(400, 'Password must be at least 8 characters long');
+    }
+
     logger.info(`Attempting registration for email: ${email}`);
 
     // Check if a user with the same email or username exists.
@@ -133,106 +144,113 @@ class AuthService {
   }
 
   async verifyEmail(token) {
+    // Add token format validation
+    if (!token || typeof token !== 'string' || token.length < 32) {
+      logger.warn('Email verification attempted with invalid token format');
+      throw new AppError(400, 'Invalid verification token format');
+    }
+
+    logger.info('Processing email verification');
     if (!token) {
-      logger.warn('Email verification attempt without token');
+      logger.warn('Email verification attempted without token');
       throw new AppError(400, 'Verification token is required');
     }
 
     // Hash the incoming token to compare with the stored hashed token.
     const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
-    const user = await prisma.user.findFirst({
-      where: {
-        verificationToken: hashedToken,
-        verificationTokenExpires: { gt: new Date() },
-      },
-    });
+    try {
+      const result = await prisma.$transaction(async (prisma) => {
+        const user = await prisma.user.findFirst({
+          where: {
+            verificationToken: hashedToken,
+            verificationTokenExpires: { gt: new Date() }
+          }
+        });
 
-    if (!user) {
-      logger.warn(`Invalid or expired verification token attempt: ${token}`);
-      throw new AppError(400, 'Invalid or expired verification token');
+        if (!user) {
+          logger.warn('Invalid or expired verification token attempted');
+          throw new AppError(400, 'Invalid or expired verification token');
+        }
+
+        // Update user and generate tokens in parallel with error handling
+        const [tokens, updatedUser] = await Promise.all([
+          this.generateTokens(user.id, user.role),
+          prisma.user.update({
+            where: { id: user.id },
+            data: {
+              isVerified: true,
+              verificationToken: null,
+              verificationTokenExpires: null
+            }
+          })
+        ]);
+
+        logger.info(`Email verified successfully for user: ${user.email}`);
+        return { user: updatedUser, tokens };
+      });
+
+      return result;
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      logger.error('Email verification failed:', error);
+      throw new AppError(500, 'Failed to verify email');
     }
-
-    if (user.isVerified) {
-      logger.info(`User already verified: ${user.email}`);
-      throw new AppError(400, 'Email already verified');
-    }
-
-    const updatedUser = await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        isVerified: true,
-        verificationToken: null,
-        verificationTokenExpires: null,
-        failedLoginAttempts: 0,
-        accountLockedUntil: null,
-      },
-    });
-
-    logger.info(`Email verified successfully for user: ${user.email}`);
-    const tokens = await this.generateTokens(updatedUser.id, updatedUser.role);
-    return {
-      user: {
-        id: updatedUser.id,
-        email: updatedUser.email,
-        username: updatedUser.username,
-        role: updatedUser.role,
-      },
-      tokens,
-    };
   }
 
   async logout(refreshToken) {
-    if (!refreshToken) {
-      throw new AppError(400, 'Refresh token is required');
-    }
-
-    try {
-      const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
-
-      // Delete all refresh tokens for the user
-      await prisma.refreshToken.deleteMany({
-        where: { userId: decoded.userId },
+    logger.info('Attempting to logout with refresh token');
+    // Delete refresh token in a transaction
+    await prisma.$transaction(async (prisma) => {
+      const token = await prisma.refreshToken.findUnique({
+        where: { token: refreshToken }
       });
 
-      logger.info(`Logged out all sessions for user: ${decoded.userId}`);
-    } catch (error) {
-      logger.error('Logout failed:', error);
-    }
+      if (!token) {
+        logger.warn('Invalid refresh token provided for logout');
+        throw new AppError(400, 'Invalid refresh token');
+      }
+
+      await prisma.refreshToken.delete({
+        where: { token: refreshToken }
+      });
+      logger.info('Refresh token successfully deleted for logout');
+    });
   }
 
   async refreshToken(refreshToken) {
-    if (!refreshToken) {
-      throw new AppError(400, 'Refresh token is required');
+    // Combine initial validations
+    if (!refreshToken || typeof refreshToken !== 'string') {
+      logger.warn('Token refresh attempted with invalid token format');
+      throw new AppError(400, 'Invalid refresh token format');
     }
 
     let decoded;
     try {
-      decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+      // Verify token and get stored token in parallel
+      const [decodedToken, storedToken] = await Promise.all([
+        jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET),
+        prisma.refreshToken.findFirst({
+          where: { token: refreshToken },
+          select: { expiresAt: true, userId: true }
+        })
+      ]);
+      decoded = decodedToken;
+
+      if (!storedToken) {
+        logger.warn(`Refresh token not found in database for user: ${decoded.userId}`);
+        throw new AppError(401, 'Invalid refresh token');
+      }
+
+      // Check expiration using timestamp comparison instead of Date object
+      if (storedToken.expiresAt.getTime() < Date.now()) {
+        logger.warn(`Expired refresh token used for user: ${decoded.userId}`);
+        throw new AppError(401, 'Refresh token has expired');
+      }
+
     } catch (error) {
       logger.error('Refresh token verification failed:', error);
       throw new AppError(401, 'Invalid refresh token');
-    }
-
-    // Check if the token exists in the database
-    const storedToken = await prisma.refreshToken.findFirst({
-      where: {
-        token: refreshToken,
-        userId: decoded.userId,
-      },
-    });
-
-    if (!storedToken) {
-      logger.warn(
-        `Refresh token not found in database for user: ${decoded.userId}`
-      );
-      throw new AppError(401, 'Invalid refresh token');
-    }
-
-    // Check if the token has expired in the database
-    if (storedToken.expiresAt < new Date()) {
-      logger.warn(`Expired refresh token used for user: ${decoded.userId}`);
-      throw new AppError(401, 'Refresh token has expired');
     }
 
     logger.info(`Refreshing tokens for user: ${decoded.userId}`);
@@ -281,57 +299,75 @@ class AuthService {
     logger.info(`Password reset token sent to email: ${email}`);
   }
 
-  async resetPassword(rawToken, newPassword) {
-    logger.info('Resetting password using token');
-    if (!rawToken) {
-      throw new AppError(400, 'Invalid reset token');
+  async resetPassword(token, newPassword) {
+    // Add password validation
+    if (!token || !newPassword) {
+      logger.warn('Password reset attempted with missing data');
+      throw new AppError(400, 'Token and new password are required');
     }
 
-    const hashedToken = crypto
-      .createHash('sha256')
-      .update(rawToken)
-      .digest('hex');
-    const user = await prisma.user.findFirst({
-      where: {
-        resetPasswordToken: hashedToken,
-        resetPasswordExpire: { gt: new Date() },
-      },
-    });
-
-    if (!user) {
-      logger.warn('Invalid or expired reset token');
-      throw new AppError(400, 'Invalid or expired token');
+    if (newPassword.length < 8) {
+      logger.warn('Password reset attempted with weak password');
+      throw new AppError(400, 'New password must be at least 8 characters long');
     }
 
-    // Check that the new password is different from the current one.
-    const isSame = await bcrypt.compare(newPassword, user.password);
-    if (isSame) {
-      throw new AppError(
-        400,
-        'New password must be different from the current password'
-      );
+    logger.info('Processing password reset request');
+    const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+
+    try {
+      // Hash password in parallel with other operations
+      const [hashedPassword, user] = await Promise.all([
+        hashPassword(newPassword),
+        prisma.$transaction(async (prisma) => {
+          const user = await prisma.user.findFirst({
+            where: {
+              resetPasswordToken: hashedToken,
+              resetPasswordExpire: { gt: new Date() }
+            }
+          });
+
+          if (!user) {
+            logger.warn('Invalid or expired reset token used');
+            throw new AppError(400, 'Invalid or expired reset token');
+          }
+
+          return prisma.user.update({
+            where: { id: user.id },
+            data: {
+              password: hashedPassword,
+              resetPasswordToken: null,
+              resetPasswordExpire: null,
+              failedLoginAttempts: 0,
+              accountLockedUntil: null
+            }
+          });
+        })
+      ]);
+
+      logger.info(`Password reset successful for user: ${user.email}`);
+      return user;
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      logger.error('Password reset failed:', error);
+      throw new AppError(500, 'Failed to reset password');
     }
-
-    const hashedPassword = await hashPassword(newPassword);
-
-    await prisma.$transaction([
-      prisma.user.update({
-        where: { id: user.id },
-        data: {
-          password: hashedPassword,
-          resetPasswordToken: null,
-          resetPasswordExpire: null,
-        },
-      }),
-      prisma.refreshToken.deleteMany({ where: { userId: user.id } }),
-    ]);
-
-    logger.info(`Password reset successful for user: ${user.email}`);
   }
 
   async updatePassword(userId, currentPassword, newPassword) {
+    // Add comprehensive password validation
     if (!userId || !currentPassword || !newPassword) {
+      logger.warn('Password update attempted with missing data');
       throw new AppError(400, 'All fields are required');
+    }
+
+    if (currentPassword === newPassword) {
+      logger.warn('Password update attempted with same password');
+      throw new AppError(400, 'New password must be different from current password');
+    }
+
+    if (newPassword.length < 8) {
+      logger.warn('Password update attempted with weak password');
+      throw new AppError(400, 'New password must be at least 8 characters long');
     }
 
     logger.info(`Updating password for user: ${userId}`);
@@ -346,15 +382,6 @@ class AuthService {
     }
 
     await this.verifyPassword(user.password, currentPassword);
-
-    // Check that the new password is different from the current one.
-    const isSame = await bcrypt.compare(newPassword, user.password);
-    if (isSame) {
-      throw new AppError(
-        400,
-        'New password must be different from the current password'
-      );
-    }
 
     const hashedPassword = await hashPassword(newPassword);
 
@@ -426,46 +453,58 @@ class AuthService {
 
 
   async generateTokens(userId, role) {
-    // Generate a unique token identifier
-    const jti = crypto.randomUUID();
+    // Add validation for required parameters
+    if (!userId || !role) {
+      logger.error('Token generation attempted without required parameters');
+      throw new AppError(400, 'User ID and role are required for token generation');
+    }
 
-    // Include the jti in both tokens
-    const accessTokenPayload = { userId, role, jti };
-    const refreshTokenPayload = { userId, role, jti };
+    logger.info(`Generating tokens for user: ${userId}`);
+    try {
+      // Generate both tokens in parallel for better performance
+      const jti = crypto.randomUUID();
+      const [accessToken, refreshToken] = await Promise.all([
+        jwt.sign(
+          { userId, role, jti },
+          process.env.JWT_ACCESS_SECRET,
+          { expiresIn: parsedJwtExpiration }
+        ),
+        jwt.sign(
+          { userId, role, jti },
+          process.env.JWT_REFRESH_SECRET,
+          { expiresIn: parsedRefreshExpiration }
+        )
+      ]);
 
-    const accessTokenOptions = { expiresIn: parsedJwtExpiration };
-    const refreshTokenOptions = { expiresIn: parsedRefreshExpiration };
+      const expiresAt = new Date(Date.now() + parsedRefreshExpiration);
 
-    const accessToken = jwt.sign(
-      accessTokenPayload,
-      process.env.JWT_ACCESS_SECRET,
-      accessTokenOptions
-    );
-    const refreshToken = jwt.sign(
-      refreshTokenPayload,
-      process.env.JWT_REFRESH_SECRET,
-      refreshTokenOptions
-    );
+      // Store refresh token with error handling
+      try {
+        await prisma.refreshToken.create({
+          data: { token: refreshToken, userId, expiresAt }
+        });
+      } catch (error) {
+        logger.error(`Failed to store refresh token for user ${userId}:`, error);
+        throw new AppError(500, 'Failed to complete authentication process');
+      }
 
-    // Calculate expiration date once for refresh token
-    const expiresAt = new Date(Date.now() + parsedRefreshExpiration);
-
-    // Save the refresh token in the database.
-    await prisma.refreshToken.create({
-      data: {
-        token: refreshToken,
-        userId,
-        expiresAt,
-      },
-    });
-
-    logger.info(`Tokens generated for user: ${userId}`);
-    return { accessToken, refreshToken };
+      logger.debug(`Tokens generated successfully for user: ${userId}`);
+      return { accessToken, refreshToken };
+    } catch (error) {
+      logger.error(`Token generation failed for user ${userId}:`, error);
+      throw new AppError(500, 'Failed to generate authentication tokens');
+    }
   }
 
   async verifyPassword(hashedPassword, candidatePassword) {
     if (!hashedPassword || !candidatePassword) {
+      logger.warn('Password verification attempted with missing data');
       throw new AppError(400, 'Password verification failed: Missing data');
+    }
+
+    if (typeof hashedPassword !== 'string' || typeof candidatePassword !== 'string') {
+      logger.warn('Password verification attempted with invalid data types');
+      throw new AppError(400, 'Invalid password format');
     }
 
     const isMatch = await bcrypt.compare(candidatePassword, hashedPassword);
@@ -476,6 +515,12 @@ class AuthService {
   }
 
   validateLoginAttempt(user, ip) {
+    // Add IP validation
+    if (!ip) {
+      logger.warn('Login attempt validation without IP address');
+      throw new AppError(400, 'IP address is required');
+    }
+
     if (!user) {
       logger.warn(`Invalid credentials from IP: ${ip}`);
       throw new AppError(401, 'Invalid credentials');
@@ -501,28 +546,44 @@ class AuthService {
   }
 
   async handleFailedLoginAttempt(userId, currentAttempts) {
-    if (!userId) return;
+    // Add validation for required parameters
+    if (!userId || typeof currentAttempts !== 'number') {
+      logger.warn('Failed login handling attempted with invalid parameters');
+      return;
+    }
 
-    const attempts = currentAttempts + 1;
-    const lockDuration = this.calculateLockDuration(attempts);
+    try {
+      const attempts = currentAttempts + 1;
+      const lockDuration = this.calculateLockDuration(attempts);
 
-    await prisma.user.update({
-      where: { id: userId },
-      data: {
-        failedLoginAttempts: attempts,
-        accountLockedUntil: lockDuration,
-      },
-    });
+      await prisma.user.update({
+        where: { id: userId },
+        data: {
+          failedLoginAttempts: attempts,
+          accountLockedUntil: lockDuration,
+        }
+      });
 
-    logger.warn(`Failed login attempts for user ${userId}: ${attempts}`);
+      if (lockDuration) {
+        logger.warn(`Account locked for user ${userId}. Attempts: ${attempts}`);
+      } else {
+        logger.warn(`Failed login attempt for user ${userId}. Attempts: ${attempts}`);
+      }
+    } catch (error) {
+      logger.error(`Failed to update login attempts for user ${userId}:`, error);
+      // Don't throw - this is a background operation
+    }
   }
 
   calculateLockDuration(attempts) {
-    if (attempts >= 5) {
-      return new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+    // Add validation for attempts parameter
+    if (typeof attempts !== 'number' || attempts < 0) {
+      logger.warn('Lock duration calculation attempted with invalid attempts count');
+      return null;
     }
-    if (attempts >= 3) {
-      return new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+
+    if (attempts >= 5) {
+      return new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
     }
     return null;
   }

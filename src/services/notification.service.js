@@ -10,21 +10,23 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Cache for compiled templates
-const templateCache = new Map();
-
 class NotificationService {
   constructor() {
     this.templateDir = path.join(__dirname, '../../email');
+    this.templateCache = new Map();
+    this.failedAttempts = new Map(); // Track failed attempts per recipient
     this.initializeTransporter();
     
-    // Verify connection but don't exit process on failure - just log the error
+    // Verify connection but don't exit process on failure
     this.verifyConnection().catch((error) => {
       logger.error('SMTP initialization failed:', error);
     });
     
-    // Pre-load common templates
-    this.preloadTemplates(['welcome', 'verify-email', 'reset-password',]);
+    // Pre-load common templates with error handling
+    this.preloadTemplates(['welcome', 'verify-email', 'reset-password']);
+
+    // Cleanup failed attempts periodically
+    setInterval(() => this.cleanupFailedAttempts(), 3600000); // Every hour
   }
 
   initializeTransporter() {
@@ -34,9 +36,10 @@ class NotificationService {
         this.transporter = nodemailer.createTransport({
           service: 'gmail',
           pool: true,
-          maxConnections: 5, // Limit parallel connections
-          rateDelta: 1000,    // Minimum time between messages
-          rateLimit: 5,       // Max messages per rateDelta
+          maxConnections: 5,
+          maxMessages: 100,
+          rateDelta: 1000,
+          rateLimit: 5,
           auth: {
             user: env.EMAIL_USER,
             pass: env.EMAIL_PASSWORD,
@@ -57,7 +60,6 @@ class NotificationService {
         });
         this.senderEmail = env.MAILOSAUR_SENDER_EMAIL;
       }
-
       logger.info(`Initialized ${env.NODE_ENV} email transporter`);
     } catch (error) {
       logger.error('Failed to initialize email transporter:', error);
@@ -120,9 +122,10 @@ class NotificationService {
   }
 
   async loadTemplate(templateName) {
-    // Return cached template if available
-    if (templateCache.has(templateName)) {
-      return templateCache.get(templateName);
+    // Check cache first
+    const cached = this.templateCache.get(templateName);
+    if (cached) {
+      return cached.template;
     }
 
     try {
@@ -130,8 +133,12 @@ class NotificationService {
       const source = await fs.readFile(templatePath, 'utf-8');
       const compiledTemplate = handlebars.compile(source);
       
-      // Cache the compiled template
-      templateCache.set(templateName, compiledTemplate);
+      // Cache with timestamp for potential future cache invalidation
+      this.templateCache.set(templateName, {
+        template: compiledTemplate,
+        timestamp: Date.now()
+      });
+      
       return compiledTemplate;
     } catch (error) {
       logger.error(`Template loading failed for "${templateName}":`, error);
@@ -141,56 +148,75 @@ class NotificationService {
 
   async sendEmail(options) {
     const MAX_RETRIES = 3;
-    let attempt = 0;
+    const recipient = options.to;
 
+    // Check failed attempts
+    const failedAttempts = this.failedAttempts.get(recipient) || { count: 0, timestamp: Date.now() };
+    if (failedAttempts.count >= 5) {
+      const timeSinceLastAttempt = Date.now() - failedAttempts.timestamp;
+      if (timeSinceLastAttempt < 3600000) { // 1 hour
+        logger.warn(`Too many failed attempts for recipient: ${recipient}`);
+        throw new AppError(429, 'Too many failed attempts. Please try again later.');
+      }
+      // Reset after 1 hour
+      this.failedAttempts.delete(recipient);
+    }
+
+    let attempt = 0;
     while (attempt < MAX_RETRIES) {
       try {
-        const template = await this.loadTemplate(options.template);
-        const html = template(options.context);
-
-        const mailOptions = {
-          from: `"${env.APP_NAME}" <${this.senderEmail}>`,
-          to: options.to,
-          subject: options.subject,
-          html,
-          envelope: {
-            from: this.senderEmail,
+        // Load template and prepare email in parallel
+        const [template, info] = await Promise.all([
+          this.loadTemplate(options.template),
+          this.transporter.sendMail({
+            from: `"${env.APP_NAME}" <${this.senderEmail}>`,
             to: options.to,
-          },
-          // Add optional CC and BCC if provided
-          ...(options.cc && { cc: options.cc }),
-          ...(options.bcc && { bcc: options.bcc }),
-          // Add attachments if provided
-          ...(options.attachments && { attachments: options.attachments }),
-        };
+            subject: options.subject,
+            html: template(options.context),
+            ...(options.cc && { cc: options.cc }),
+            ...(options.bcc && { bcc: options.bcc }),
+            ...(options.attachments && { attachments: options.attachments })
+          })
+        ]);
 
-        const info = await this.transporter.sendMail(mailOptions);
+        // Clear failed attempts on success
+        this.failedAttempts.delete(recipient);
         logger.info(`Email sent to ${options.to} (${info.messageId})`);
 
         return {
           success: true,
           messageId: info.messageId,
-          response: info.response,
+          response: info.response
         };
       } catch (error) {
         attempt++;
+        // Update failed attempts
+        failedAttempts.count++;
+        failedAttempts.timestamp = Date.now();
+        this.failedAttempts.set(recipient, failedAttempts);
+
         logger.warn(`Email attempt ${attempt} failed: ${error.message}`);
 
         if (attempt === MAX_RETRIES) {
           logger.error('Email delivery failed after retries:', {
             error: error.message,
             recipient: options.to,
-            stack: error.stack,
+            stack: error.stack
           });
-
-          throw new AppError(500, 'Failed to send email', {
-            recipient: options.to,
-            error: error.message,
-          });
+          throw new AppError(500, 'Failed to send email');
         }
 
         // Exponential backoff
-        await new Promise((resolve) => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
+        await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
+      }
+    }
+  }
+
+  cleanupFailedAttempts() {
+    const oneHourAgo = Date.now() - 3600000;
+    for (const [recipient, data] of this.failedAttempts.entries()) {
+      if (data.timestamp < oneHourAgo) {
+        this.failedAttempts.delete(recipient);
       }
     }
   }
@@ -272,12 +298,6 @@ class NotificationService {
         ...context,
       },
     });
-  }
-  
-  // Method to clear template cache (useful for testing or template updates)
-  clearTemplateCache() {
-    templateCache.clear();
-    logger.info('Email template cache cleared');
   }
 }
 
