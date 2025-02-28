@@ -144,28 +144,24 @@ class AuthService {
   }
 
   async verifyEmail(token) {
-    // Add token format validation
     if (!token || typeof token !== 'string' || token.length < 32) {
       logger.warn('Email verification attempted with invalid token format');
       throw new AppError(400, 'Invalid verification token format');
     }
 
     logger.info('Processing email verification');
-    if (!token) {
-      logger.warn('Email verification attempted without token');
-      throw new AppError(400, 'Verification token is required');
-    }
-
-    // Hash the incoming token to compare with the stored hashed token.
     const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
     try {
       const result = await prisma.$transaction(async (prisma) => {
+        // First find the user with minimal fields
         const user = await prisma.user.findFirst({
           where: {
             verificationToken: hashedToken,
-            verificationTokenExpires: { gt: new Date() }
-          }
+            verificationTokenExpires: { gt: new Date() },
+            isVerified: false,
+          },
+          select: { id: true, email: true, role: true }
         });
 
         if (!user) {
@@ -173,26 +169,40 @@ class AuthService {
           throw new AppError(400, 'Invalid or expired verification token');
         }
 
-        // Update user and generate tokens in parallel with error handling
-        const [tokens, updatedUser] = await Promise.all([
-          this.generateTokens(user.id, user.role),
-          prisma.user.update({
-            where: { id: user.id },
-            data: {
-              isVerified: true,
-              verificationToken: null,
-              verificationTokenExpires: null
-            }
-          })
-        ]);
+        // Update with minimal return fields
+        await prisma.user.update({
+          where: { id: user.id },
+          data: {
+            isVerified: true,
+            verificationToken: null,
+            verificationTokenExpires: null
+          }
+        });
 
+        // Generate tokens
+        const tokens = await this.generateTokens(user.id, user.role);
         logger.info(`Email verified successfully for user: ${user.email}`);
-        return { user: updatedUser, tokens };
+        
+        // Return minimal data
+        return {
+          user: { id: user.id, email: user.email },
+          tokens
+        };
+      }, {
+        timeout: 10000,
+        maxWait: 5000,
+        isolationLevel: 'ReadCommitted'
       });
 
+      // Return the result directly without wrapping
       return result;
     } catch (error) {
+      if (error.code === 'P2025') {
+        logger.warn('Invalid or expired verification token attempted');
+        throw new AppError(400, 'Invalid or expired verification token');
+      }
       if (error instanceof AppError) throw error;
+      
       logger.error('Email verification failed:', error);
       throw new AppError(500, 'Failed to verify email');
     }
@@ -200,26 +210,22 @@ class AuthService {
 
   async logout(refreshToken) {
     logger.info('Attempting to logout with refresh token');
-    // Delete refresh token in a transaction
-    await prisma.$transaction(async (prisma) => {
-      const token = await prisma.refreshToken.findUnique({
-        where: { token: refreshToken }
-      });
-
-      if (!token) {
-        logger.warn('Invalid refresh token provided for logout');
-        throw new AppError(400, 'Invalid refresh token');
-      }
-
+    try {
+      // Use delete instead of transaction since we only need one operation
       await prisma.refreshToken.delete({
         where: { token: refreshToken }
       });
       logger.info('Refresh token successfully deleted for logout');
-    });
+    } catch (error) {
+      if (error.code === 'P2025') {
+        logger.warn('Invalid refresh token provided for logout');
+        throw new AppError(400, 'Invalid refresh token');
+      }
+      throw error;
+    }
   }
 
   async refreshToken(refreshToken) {
-    // Combine initial validations
     if (!refreshToken || typeof refreshToken !== 'string') {
       logger.warn('Token refresh attempted with invalid token format');
       throw new AppError(400, 'Invalid refresh token format');
@@ -227,34 +233,53 @@ class AuthService {
 
     let decoded;
     try {
-      // Verify token and get stored token in parallel
-      const [decodedToken, storedToken] = await Promise.all([
-        jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET),
-        prisma.refreshToken.findFirst({
-          where: { token: refreshToken },
-          select: { expiresAt: true, userId: true }
-        })
-      ]);
-      decoded = decodedToken;
+      // First verify the JWT signature
+      decoded = await jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
 
-      if (!storedToken) {
-        logger.warn(`Refresh token not found in database for user: ${decoded.userId}`);
-        throw new AppError(401, 'Invalid refresh token');
+      // Find and delete the old refresh token in one operation
+      const oldToken = await prisma.refreshToken.delete({
+        where: { 
+          token: refreshToken,
+          userId: decoded.userId,
+          expiresAt: { gt: new Date() }
+        },
+        select: { userId: true }
+      });
+
+      if (!oldToken) {
+        logger.warn(`Invalid or expired refresh token used for user: ${decoded.userId}`);
+        // Clean up any other tokens for this user as security measure
+        await prisma.refreshToken.deleteMany({
+          where: { userId: decoded.userId }
+        });
+        throw new AppError(401, 'Invalid or expired refresh token');
       }
 
-      // Check expiration using timestamp comparison instead of Date object
-      if (storedToken.expiresAt.getTime() < Date.now()) {
-        logger.warn(`Expired refresh token used for user: ${decoded.userId}`);
+      // Generate new tokens
+      const tokens = await this.generateTokens(decoded.userId, decoded.role);
+      logger.info(`Tokens refreshed successfully for user: ${decoded.userId}`);
+      
+      return tokens;
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      
+      if (error.name === 'TokenExpiredError') {
+        logger.warn(`Expired refresh token used: ${error.message}`);
+        // Clean up expired token
+        await prisma.refreshToken.deleteMany({
+          where: { token: refreshToken }
+        });
         throw new AppError(401, 'Refresh token has expired');
       }
 
-    } catch (error) {
-      logger.error('Refresh token verification failed:', error);
-      throw new AppError(401, 'Invalid refresh token');
-    }
+      if (error.name === 'JsonWebTokenError') {
+        logger.warn(`Invalid refresh token signature: ${error.message}`);
+        throw new AppError(401, 'Invalid refresh token');
+      }
 
-    logger.info(`Refreshing tokens for user: ${decoded.userId}`);
-    return this.generateTokens(decoded.userId, decoded.role);
+      logger.error('Refresh token verification failed:', error);
+      throw new AppError(500, 'Failed to refresh tokens');
+    }
   }
 
   async forgotPassword(email, req) {
@@ -315,37 +340,36 @@ class AuthService {
     const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
     try {
-      // Hash password in parallel with other operations
-      const [hashedPassword, user] = await Promise.all([
+      // First find the user and hash the password independently
+      const [hashedPassword, existingUser] = await Promise.all([
         hashPassword(newPassword),
-        prisma.$transaction(async (prisma) => {
-          const user = await prisma.user.findFirst({
-            where: {
-              resetPasswordToken: hashedToken,
-              resetPasswordExpire: { gt: new Date() }
-            }
-          });
-
-          if (!user) {
-            logger.warn('Invalid or expired reset token used');
-            throw new AppError(400, 'Invalid or expired reset token');
+        prisma.user.findFirst({
+          where: {
+            resetPasswordToken: hashedToken,
+            resetPasswordExpire: { gt: new Date() }
           }
-
-          return prisma.user.update({
-            where: { id: user.id },
-            data: {
-              password: hashedPassword,
-              resetPasswordToken: null,
-              resetPasswordExpire: null,
-              failedLoginAttempts: 0,
-              accountLockedUntil: null
-            }
-          });
         })
       ]);
 
-      logger.info(`Password reset successful for user: ${user.email}`);
-      return user;
+      if (!existingUser) {
+        logger.warn('Invalid or expired reset token used');
+        throw new AppError(400, 'Invalid or expired reset token');
+      }
+
+      // Then update the user with the hashed password
+      const updatedUser = await prisma.user.update({
+        where: { id: existingUser.id },
+        data: {
+          password: hashedPassword,
+          resetPasswordToken: null,
+          resetPasswordExpire: null,
+          failedLoginAttempts: 0,
+          accountLockedUntil: null
+        }
+      });
+
+      logger.info(`Password reset successful for user: ${updatedUser.email}`);
+      return updatedUser;
     } catch (error) {
       if (error instanceof AppError) throw error;
       logger.error('Password reset failed:', error);
@@ -398,9 +422,33 @@ class AuthService {
 
   // Clean up expired refresh tokens. (Scheduled task)
   async cleanExpiredTokens() {
-    await prisma.refreshToken.deleteMany({
-      where: { expiresAt: { lt: new Date() } },
-    });
+    const now = new Date();
+    const batchSize = 100;
+    let deleted = 0;
+
+    try {
+      // Get expired tokens in batches
+      const expiredTokens = await prisma.refreshToken.findMany({
+        where: { expiresAt: { lt: now } },
+        select: { id: true },
+        take: batchSize
+      });
+
+      if (expiredTokens.length > 0) {
+        // Delete in batch but with better error handling
+        await prisma.refreshToken.deleteMany({
+          where: {
+            id: { in: expiredTokens.map(token => token.id) }
+          }
+        });
+        deleted = expiredTokens.length;
+      }
+
+      logger.info(`Cleaned ${deleted} expired refresh tokens`);
+    } catch (error) {
+      logger.error('Failed to clean expired tokens:', error);
+      // Don't throw as this is a background task
+    }
   }
 
   // async handleGoogleLogin(profile) {

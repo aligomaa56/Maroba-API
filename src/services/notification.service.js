@@ -158,17 +158,16 @@ class NotificationService {
         logger.warn(`Too many failed attempts for recipient: ${recipient}`);
         throw new AppError(429, 'Too many failed attempts. Please try again later.');
       }
-      // Reset after 1 hour
       this.failedAttempts.delete(recipient);
     }
 
-    let attempt = 0;
-    while (attempt < MAX_RETRIES) {
-      try {
-        // Load template and prepare email in parallel
-        const [template, info] = await Promise.all([
-          this.loadTemplate(options.template),
-          this.transporter.sendMail({
+    // Start email sending process asynchronously
+    const emailPromise = (async () => {
+      let attempt = 0;
+      while (attempt < MAX_RETRIES) {
+        try {
+          const template = await this.loadTemplate(options.template);
+          const info = await this.transporter.sendMail({
             from: `"${env.APP_NAME}" <${this.senderEmail}>`,
             to: options.to,
             subject: options.subject,
@@ -176,40 +175,47 @@ class NotificationService {
             ...(options.cc && { cc: options.cc }),
             ...(options.bcc && { bcc: options.bcc }),
             ...(options.attachments && { attachments: options.attachments })
-          })
-        ]);
-
-        // Clear failed attempts on success
-        this.failedAttempts.delete(recipient);
-        logger.info(`Email sent to ${options.to} (${info.messageId})`);
-
-        return {
-          success: true,
-          messageId: info.messageId,
-          response: info.response
-        };
-      } catch (error) {
-        attempt++;
-        // Update failed attempts
-        failedAttempts.count++;
-        failedAttempts.timestamp = Date.now();
-        this.failedAttempts.set(recipient, failedAttempts);
-
-        logger.warn(`Email attempt ${attempt} failed: ${error.message}`);
-
-        if (attempt === MAX_RETRIES) {
-          logger.error('Email delivery failed after retries:', {
-            error: error.message,
-            recipient: options.to,
-            stack: error.stack
           });
-          throw new AppError(500, 'Failed to send email');
-        }
 
-        // Exponential backoff
-        await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
+          this.failedAttempts.delete(recipient);
+          logger.info(`Email sent to ${options.to} (${info.messageId})`);
+          return {
+            success: true,
+            messageId: info.messageId,
+            response: info.response
+          };
+        } catch (error) {
+          attempt++;
+          failedAttempts.count++;
+          failedAttempts.timestamp = Date.now();
+          this.failedAttempts.set(recipient, failedAttempts);
+
+          logger.warn(`Email attempt ${attempt} failed: ${error.message}`);
+
+          if (attempt === MAX_RETRIES) {
+            logger.error('Email delivery failed after retries:', {
+              error: error.message,
+              recipient: options.to,
+              stack: error.stack
+            });
+            throw new AppError(500, 'Failed to send email');
+          }
+
+          await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
+        }
       }
-    }
+    })();
+
+    // Don't wait for the email to be sent
+    emailPromise.catch(error => {
+      logger.error('Background email task failed:', error);
+    });
+
+    // Return immediately while email sends in background
+    return { 
+      success: true, 
+      message: 'Email sending initiated' 
+    };
   }
 
   cleanupFailedAttempts() {

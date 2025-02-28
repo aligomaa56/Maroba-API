@@ -111,13 +111,11 @@ export const verifyEmail = catchAsync(async (req, res, next) => {
   }
   
   const result = await authService.verifyEmail(token);
+  
   res.status(200).json({
     success: true,
     message: 'Email verified successfully',
-    data: {
-      user: result.user,
-      tokens: result.tokens,
-    },
+    data: result // Result now contains user and tokens directly
   });
 });
 
