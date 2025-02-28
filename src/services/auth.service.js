@@ -22,7 +22,7 @@ const parsedRefreshExpiration = parseExpiration(
 class AuthService {
 
   async register(email, username, password, req) {
-    // Input validation
+    // Add input validation
     if (!email || !username || !password) {
       logger.warn('Registration attempted with missing data');
       throw new AppError(400, 'Email, username, and password are required');
@@ -35,89 +35,57 @@ class AuthService {
 
     logger.info(`Attempting registration for email: ${email}`);
 
-    try {
-      // Wrap everything in a transaction to ensure atomicity
-      const result = await prisma.$transaction(async (prisma) => {
-        // Check existing user first
-        const existingUser = await prisma.user.findFirst({
-          where: {
-            OR: [{ email }, { username }],
-          },
-        });
+    // Check if a user with the same email or username exists.
+    const existingUser = await prisma.user.findFirst({
+      where: {
+        OR: [{ email }, { username }],
+      },
+    });
 
-        if (existingUser) {
-          logger.warn(`Registration failed: Email or username already taken`);
-          throw new AppError(400, 'Registration failed: Email or username already taken');
-        }
-
-        // Prepare all the data we need
-        const [hashedPassword, rawToken, hashedToken] = await Promise.all([
-          hashPassword(password),
-          Promise.resolve(crypto.randomBytes(32).toString('hex')),
-          Promise.resolve(crypto.randomBytes(32).toString('hex'))
-            .then(token => crypto.createHash('sha256').update(token).digest('hex'))
-        ]);
-
-        // Verify email service is ready before proceeding
-        try {
-          await notificationService.verifyConnection();
-        } catch (error) {
-          logger.error('Email service not available:', error);
-          throw new AppError(503, 'Registration service temporarily unavailable');
-        }
-
-        // Create the user
-        const newUser = await prisma.user.create({
-          data: {
-            email,
-            username,
-            password: hashedPassword,
-            failedLoginAttempts: 0,
-            accountLockedUntil: null,
-            isVerified: false,
-            role: UserRole.USER,
-            verificationToken: hashedToken,
-            verificationTokenExpires: new Date(Date.now() + EMAIL_VERIFICATION_EXPIRES_IN),
-          },
-        });
-
-        // Send verification email
-        try {
-          await notificationService.sendVerificationNotification(
-            email,
-            rawToken,
-            req
-          );
-        } catch (error) {
-          // If email fails, rollback the transaction
-          logger.error(`Failed to send verification email: ${error.message}`);
-          throw new AppError(500, 'Failed to complete registration process');
-        }
-
-        logger.info(`User registered successfully: ${email}`);
-        return { 
-          id: newUser.id, 
-          email: newUser.email, 
-          username: newUser.username 
-        };
-      }, {
-        timeout: 10000, // 10 second timeout
-        maxWait: 5000,  // Maximum wait time for transaction
-        isolationLevel: 'Serializable' // Highest isolation level for registration
-      });
-
-      return result;
-    } catch (error) {
-      if (error instanceof AppError) throw error;
-      
-      logger.error('Registration failed:', error);
+    if (existingUser) {
+      logger.warn(`Registration failed: Email or username already taken`);
       throw new AppError(
-        500,
-        'Registration failed. Please try again later.',
-        false,
-        { originalError: error.message }
+        400,
+        'Registration failed: Email or username already taken'
       );
     }
+
+    // Hash the password.
+    const hashedPassword = await hashPassword(password);
+
+    // Generate a verification token.
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const hashedToken = crypto
+      .createHash('sha256')
+      .update(rawToken)
+      .digest('hex');
+
+    // Create the user with default properties.
+    const newUser = await prisma.user.create({
+      data: {
+        email,
+        username,
+        password: hashedPassword,
+        failedLoginAttempts: 0,
+        accountLockedUntil: null,
+        isVerified: false,
+        role: UserRole.USER,
+        verificationToken: hashedToken,
+        verificationTokenExpires: new Date(
+          Date.now() + EMAIL_VERIFICATION_EXPIRES_IN
+        ),
+      },
+    });
+
+    // Send verification email with the raw (unencrypted) token.
+    await notificationService.sendVerificationNotification(
+      email,
+      rawToken,
+      req
+    );
+
+    logger.info(`User registered successfully: ${email}`);
+    return { id: newUser.id, email: newUser.email, username: newUser.username };
   }
 
   async login(identifier, password, ip) {
@@ -242,22 +210,26 @@ class AuthService {
 
   async logout(refreshToken) {
     logger.info('Attempting to logout with refresh token');
-    try {
-      // Use delete instead of transaction since we only need one operation
+    // Delete refresh token in a transaction
+    await prisma.$transaction(async (prisma) => {
+      const token = await prisma.refreshToken.findUnique({
+        where: { token: refreshToken }
+      });
+
+      if (!token) {
+        logger.warn('Invalid refresh token provided for logout');
+        throw new AppError(400, 'Invalid refresh token');
+      }
+
       await prisma.refreshToken.delete({
         where: { token: refreshToken }
       });
       logger.info('Refresh token successfully deleted for logout');
-    } catch (error) {
-      if (error.code === 'P2025') {
-        logger.warn('Invalid refresh token provided for logout');
-        throw new AppError(400, 'Invalid refresh token');
-      }
-      throw error;
-    }
+    });
   }
 
   async refreshToken(refreshToken) {
+    // Combine initial validations
     if (!refreshToken || typeof refreshToken !== 'string') {
       logger.warn('Token refresh attempted with invalid token format');
       throw new AppError(400, 'Invalid refresh token format');
@@ -265,53 +237,34 @@ class AuthService {
 
     let decoded;
     try {
-      // First verify the JWT signature
-      decoded = await jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+      // Verify token and get stored token in parallel
+      const [decodedToken, storedToken] = await Promise.all([
+        jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET),
+        prisma.refreshToken.findFirst({
+          where: { token: refreshToken },
+          select: { expiresAt: true, userId: true }
+        })
+      ]);
+      decoded = decodedToken;
 
-      // Find and delete the old refresh token in one operation
-      const oldToken = await prisma.refreshToken.delete({
-        where: { 
-          token: refreshToken,
-          userId: decoded.userId,
-          expiresAt: { gt: new Date() }
-        },
-        select: { userId: true }
-      });
-
-      if (!oldToken) {
-        logger.warn(`Invalid or expired refresh token used for user: ${decoded.userId}`);
-        // Clean up any other tokens for this user as security measure
-        await prisma.refreshToken.deleteMany({
-          where: { userId: decoded.userId }
-        });
-        throw new AppError(401, 'Invalid or expired refresh token');
-      }
-
-      // Generate new tokens
-      const tokens = await this.generateTokens(decoded.userId, decoded.role);
-      logger.info(`Tokens refreshed successfully for user: ${decoded.userId}`);
-      
-      return tokens;
-    } catch (error) {
-      if (error instanceof AppError) throw error;
-      
-      if (error.name === 'TokenExpiredError') {
-        logger.warn(`Expired refresh token used: ${error.message}`);
-        // Clean up expired token
-        await prisma.refreshToken.deleteMany({
-          where: { token: refreshToken }
-        });
-        throw new AppError(401, 'Refresh token has expired');
-      }
-
-      if (error.name === 'JsonWebTokenError') {
-        logger.warn(`Invalid refresh token signature: ${error.message}`);
+      if (!storedToken) {
+        logger.warn(`Refresh token not found in database for user: ${decoded.userId}`);
         throw new AppError(401, 'Invalid refresh token');
       }
 
+      // Check expiration using timestamp comparison instead of Date object
+      if (storedToken.expiresAt.getTime() < Date.now()) {
+        logger.warn(`Expired refresh token used for user: ${decoded.userId}`);
+        throw new AppError(401, 'Refresh token has expired');
+      }
+
+    } catch (error) {
       logger.error('Refresh token verification failed:', error);
-      throw new AppError(500, 'Failed to refresh tokens');
+      throw new AppError(401, 'Invalid refresh token');
     }
+
+    logger.info(`Refreshing tokens for user: ${decoded.userId}`);
+    return this.generateTokens(decoded.userId, decoded.role);
   }
 
   async forgotPassword(email, req) {
@@ -372,36 +325,37 @@ class AuthService {
     const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
     try {
-      // First find the user and hash the password independently
-      const [hashedPassword, existingUser] = await Promise.all([
+      // Hash password in parallel with other operations
+      const [hashedPassword, user] = await Promise.all([
         hashPassword(newPassword),
-        prisma.user.findFirst({
-          where: {
-            resetPasswordToken: hashedToken,
-            resetPasswordExpire: { gt: new Date() }
+        prisma.$transaction(async (prisma) => {
+          const user = await prisma.user.findFirst({
+            where: {
+              resetPasswordToken: hashedToken,
+              resetPasswordExpire: { gt: new Date() }
+            }
+          });
+
+          if (!user) {
+            logger.warn('Invalid or expired reset token used');
+            throw new AppError(400, 'Invalid or expired reset token');
           }
+
+          return prisma.user.update({
+            where: { id: user.id },
+            data: {
+              password: hashedPassword,
+              resetPasswordToken: null,
+              resetPasswordExpire: null,
+              failedLoginAttempts: 0,
+              accountLockedUntil: null
+            }
+          });
         })
       ]);
 
-      if (!existingUser) {
-        logger.warn('Invalid or expired reset token used');
-        throw new AppError(400, 'Invalid or expired reset token');
-      }
-
-      // Then update the user with the hashed password
-      const updatedUser = await prisma.user.update({
-        where: { id: existingUser.id },
-        data: {
-          password: hashedPassword,
-          resetPasswordToken: null,
-          resetPasswordExpire: null,
-          failedLoginAttempts: 0,
-          accountLockedUntil: null
-        }
-      });
-
-      logger.info(`Password reset successful for user: ${updatedUser.email}`);
-      return updatedUser;
+      logger.info(`Password reset successful for user: ${user.email}`);
+      return user;
     } catch (error) {
       if (error instanceof AppError) throw error;
       logger.error('Password reset failed:', error);
@@ -454,33 +408,9 @@ class AuthService {
 
   // Clean up expired refresh tokens. (Scheduled task)
   async cleanExpiredTokens() {
-    const now = new Date();
-    const batchSize = 100;
-    let deleted = 0;
-
-    try {
-      // Get expired tokens in batches
-      const expiredTokens = await prisma.refreshToken.findMany({
-        where: { expiresAt: { lt: now } },
-        select: { id: true },
-        take: batchSize
-      });
-
-      if (expiredTokens.length > 0) {
-        // Delete in batch but with better error handling
-        await prisma.refreshToken.deleteMany({
-          where: {
-            id: { in: expiredTokens.map(token => token.id) }
-          }
-        });
-        deleted = expiredTokens.length;
-      }
-
-      logger.info(`Cleaned ${deleted} expired refresh tokens`);
-    } catch (error) {
-      logger.error('Failed to clean expired tokens:', error);
-      // Don't throw as this is a background task
-    }
+    await prisma.refreshToken.deleteMany({
+      where: { expiresAt: { lt: new Date() } },
+    });
   }
 
   // async handleGoogleLogin(profile) {
