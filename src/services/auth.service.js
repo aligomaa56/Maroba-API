@@ -22,7 +22,7 @@ const parsedRefreshExpiration = parseExpiration(
 class AuthService {
 
   async register(email, username, password, req) {
-    // Add input validation
+    // Input validation
     if (!email || !username || !password) {
       logger.warn('Registration attempted with missing data');
       throw new AppError(400, 'Email, username, and password are required');
@@ -35,57 +35,89 @@ class AuthService {
 
     logger.info(`Attempting registration for email: ${email}`);
 
-    // Check if a user with the same email or username exists.
-    const existingUser = await prisma.user.findFirst({
-      where: {
-        OR: [{ email }, { username }],
-      },
-    });
+    try {
+      // Wrap everything in a transaction to ensure atomicity
+      const result = await prisma.$transaction(async (prisma) => {
+        // Check existing user first
+        const existingUser = await prisma.user.findFirst({
+          where: {
+            OR: [{ email }, { username }],
+          },
+        });
 
-    if (existingUser) {
-      logger.warn(`Registration failed: Email or username already taken`);
+        if (existingUser) {
+          logger.warn(`Registration failed: Email or username already taken`);
+          throw new AppError(400, 'Registration failed: Email or username already taken');
+        }
+
+        // Prepare all the data we need
+        const [hashedPassword, rawToken, hashedToken] = await Promise.all([
+          hashPassword(password),
+          Promise.resolve(crypto.randomBytes(32).toString('hex')),
+          Promise.resolve(crypto.randomBytes(32).toString('hex'))
+            .then(token => crypto.createHash('sha256').update(token).digest('hex'))
+        ]);
+
+        // Verify email service is ready before proceeding
+        try {
+          await notificationService.verifyConnection();
+        } catch (error) {
+          logger.error('Email service not available:', error);
+          throw new AppError(503, 'Registration service temporarily unavailable');
+        }
+
+        // Create the user
+        const newUser = await prisma.user.create({
+          data: {
+            email,
+            username,
+            password: hashedPassword,
+            failedLoginAttempts: 0,
+            accountLockedUntil: null,
+            isVerified: false,
+            role: UserRole.USER,
+            verificationToken: hashedToken,
+            verificationTokenExpires: new Date(Date.now() + EMAIL_VERIFICATION_EXPIRES_IN),
+          },
+        });
+
+        // Send verification email
+        try {
+          await notificationService.sendVerificationNotification(
+            email,
+            rawToken,
+            req
+          );
+        } catch (error) {
+          // If email fails, rollback the transaction
+          logger.error(`Failed to send verification email: ${error.message}`);
+          throw new AppError(500, 'Failed to complete registration process');
+        }
+
+        logger.info(`User registered successfully: ${email}`);
+        return { 
+          id: newUser.id, 
+          email: newUser.email, 
+          username: newUser.username 
+        };
+      }, {
+        timeout: 10000, // 10 second timeout
+        maxWait: 5000,  // Maximum wait time for transaction
+        isolationLevel: 'Serializable' // Highest isolation level for registration
+      });
+
+      return result;
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      
+      logger.error('Registration failed:', error);
       throw new AppError(
-        400,
-        'Registration failed: Email or username already taken'
+        500,
+        'Registration failed. Please try again later.',
+        false,
+        { originalError: error.message }
       );
     }
-
-    // Hash the password.
-    const hashedPassword = await hashPassword(password);
-
-    // Generate a verification token.
-    const rawToken = crypto.randomBytes(32).toString('hex');
-    const hashedToken = crypto
-      .createHash('sha256')
-      .update(rawToken)
-      .digest('hex');
-
-    // Create the user with default properties.
-    const newUser = await prisma.user.create({
-      data: {
-        email,
-        username,
-        password: hashedPassword,
-        failedLoginAttempts: 0,
-        accountLockedUntil: null,
-        isVerified: false,
-        role: UserRole.USER,
-        verificationToken: hashedToken,
-        verificationTokenExpires: new Date(
-          Date.now() + EMAIL_VERIFICATION_EXPIRES_IN
-        ),
-      },
-    });
-
-    // Send verification email with the raw (unencrypted) token.
-    await notificationService.sendVerificationNotification(
-      email,
-      rawToken,
-      req
-    );
-
-    logger.info(`User registered successfully: ${email}`);
-    return { id: newUser.id, email: newUser.email, username: newUser.username };
   }
 
   async login(identifier, password, ip) {
