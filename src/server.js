@@ -121,21 +121,20 @@ class ServerInstance {
   }
 
   async start() {
-    if (this.isStarting) {
-      logger.warn('Server startup already in progress');
-      return;
-    }
-
-    if (this.server) {
-      logger.warn('Server is already running');
+    if (this.isStarting || this.server) {
       return;
     }
 
     this.isStarting = true;
 
     try {
+      // Initialize core services in parallel
+      await Promise.all([
+        this.initializeDatabase(),
+        this.initializeEmailService()
+      ]);
+
       this.registerProcessHandlers();
-      await connectDatabase();
 
       return new Promise((resolve, reject) => {
         this.server = this.httpServer.listen(this.PORT, () => {

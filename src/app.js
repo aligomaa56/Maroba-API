@@ -4,7 +4,7 @@ import passport from 'passport';
 import cors from 'cors';
 import corsOptions from './config/cors.config.js';
 import { errorHandler } from './middleware/error.middleware.js';
-import { publicLimiter, authLimiter, apiLimiter } from './middleware/rate-limiter.middleware.js';
+import { createRateLimiter, RouteType } from './config/rate-limit.config.js';
 // import { fileScanner } from './middleware/file-scanner.middleware.js';
 
 
@@ -29,7 +29,7 @@ app.use(cors(corsOptions));
 app.use(passport.initialize());
 
 // Security middleware
-app.use(publicLimiter);
+app.use(createRateLimiter(RouteType.PUBLIC));
 // app.use(fileScanner);
 
 // Health check endpoint
@@ -39,7 +39,7 @@ app.get('/health', (req, res) => res.status(200).json({
 }));
 
 // API routes with specific rate limits
-app.use('/api/auth',authLimiter, authRoutes);
+app.use('/api/auth',createRateLimiter(RouteType.AUTHENTICATION), authRoutes);
 // app.use('/api/products', apiLimiter, productRoutes);
 // app.use('/api/orders', apiLimiter, orderRoutes);
 // app.use('/api/chat', apiLimiter, chatRoutes);
