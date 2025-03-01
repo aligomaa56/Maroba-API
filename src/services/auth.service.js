@@ -362,15 +362,12 @@ class AuthService {
     logger.info('Processing password reset request');
 
     try {
-      // Run token hashing and password hashing in parallel
-      const [hashedToken, hashedPassword] = await Promise.all([
-        crypto.createHash('sha256').update(token).digest('hex'),
-        hashPassword(newPassword)
-      ]);
+      // Hash the token first
+      const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
       // Execute the reset in a transaction
       const result = await prisma.$transaction(async (prisma) => {
-        // Find user and update in a single transaction to prevent race conditions
+        // Find user first
         const user = await prisma.user.findFirst({
           where: {
             resetPasswordToken: hashedToken,
@@ -386,6 +383,9 @@ class AuthService {
           logger.warn('Invalid or expired reset token used');
           throw new AppError(400, 'Invalid or expired reset token');
         }
+
+        // Hash the password after finding the user
+        const hashedPassword = await hashPassword(newPassword);
 
         // Update user with new password and reset token fields
         const updatedUser = await prisma.user.update({
@@ -403,7 +403,7 @@ class AuthService {
           }
         });
 
-        // Optionally, invalidate all refresh tokens in parallel with the update
+        // Invalidate all refresh tokens
         await prisma.refreshToken.deleteMany({
           where: { userId: user.id }
         });
