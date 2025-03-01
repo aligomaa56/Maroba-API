@@ -511,9 +511,18 @@ class AuthService {
 
   // Clean up expired refresh tokens. (Scheduled task)
   async cleanExpiredTokens() {
-    await prisma.refreshToken.deleteMany({
-      where: { expiresAt: { lt: new Date() } },
-    });
+    const batchSize = 1000;
+    let deleted = 0;
+    
+    do {
+      const result = await prisma.refreshToken.deleteMany({
+        where: { 
+          expiresAt: { lt: new Date() }
+        },
+        take: batchSize
+      });
+      deleted = result.count;
+    } while (deleted === batchSize);
   }
 
   // async handleGoogleLogin(profile) {

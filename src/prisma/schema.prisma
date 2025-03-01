@@ -74,6 +74,11 @@ model User {
 
   @@index([email])
   @@index([role])
+  @@index([email, username])
+  @@index([resetPasswordToken, resetPasswordExpire])
+  @@index([verificationToken, verificationTokenExpires])
+  @@index([accountLockedUntil, failedLoginAttempts])
+  @@index([isVerified, accountLockedUntil])
 }
 
 model Order {
@@ -143,6 +148,8 @@ model RefreshToken {
   createdAt DateTime @default(now())
 
   @@index([token])
+  @@index([token, expiresAt])
+  @@index([userId, expiresAt])
 }
 
 model Address {
