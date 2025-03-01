@@ -14,19 +14,24 @@ class NotificationService {
   constructor() {
     this.templateDir = path.join(__dirname, '../../email');
     this.templateCache = new Map();
-    this.failedAttempts = new Map(); // Track failed attempts per recipient
+    this.failedAttempts = new Map();
+    
+    // Initialize transporter immediately
     this.initializeTransporter();
     
-    // Verify connection but don't exit process on failure
-    this.verifyConnection().catch((error) => {
-      logger.error('SMTP initialization failed:', error);
-    });
-    
-    // Pre-load common templates with error handling
-    this.preloadTemplates(['welcome', 'verify-email', 'reset-password']);
+    // Verify connection immediately
+    this.verifyConnection()
+      .then(() => {
+        logger.info('Email service initialized successfully');
+        // Preload templates only after successful connection
+        return this.preloadTemplates(['welcome', 'verify-email', 'reset-password']);
+      })
+      .catch((error) => {
+        logger.error('Email service initialization failed:', error);
+      });
 
-    // Cleanup failed attempts periodically
-    setInterval(() => this.cleanupFailedAttempts(), 3600000); // Every hour
+    // Cleanup failed attempts every hour
+    setInterval(() => this.cleanupFailedAttempts(), 3600000);
   }
 
   initializeTransporter() {
@@ -161,61 +166,49 @@ class NotificationService {
       this.failedAttempts.delete(recipient);
     }
 
-    // Start email sending process asynchronously
-    const emailPromise = (async () => {
-      let attempt = 0;
-      while (attempt < MAX_RETRIES) {
-        try {
-          const template = await this.loadTemplate(options.template);
-          const info = await this.transporter.sendMail({
-            from: `"${env.APP_NAME}" <${this.senderEmail}>`,
-            to: options.to,
-            subject: options.subject,
-            html: template(options.context),
-            ...(options.cc && { cc: options.cc }),
-            ...(options.bcc && { bcc: options.bcc }),
-            ...(options.attachments && { attachments: options.attachments })
-          });
+    // Don't use background processing in serverless environment
+    let attempt = 0;
+    while (attempt < MAX_RETRIES) {
+      try {
+        const template = await this.loadTemplate(options.template);
+        const info = await this.transporter.sendMail({
+          from: `"${env.APP_NAME}" <${this.senderEmail}>`,
+          to: options.to,
+          subject: options.subject,
+          html: template(options.context),
+          ...(options.cc && { cc: options.cc }),
+          ...(options.bcc && { bcc: options.bcc }),
+          ...(options.attachments && { attachments: options.attachments })
+        });
 
-          this.failedAttempts.delete(recipient);
-          logger.info(`Email sent to ${options.to} (${info.messageId})`);
-          return {
-            success: true,
-            messageId: info.messageId,
-            response: info.response
-          };
-        } catch (error) {
-          attempt++;
-          failedAttempts.count++;
-          failedAttempts.timestamp = Date.now();
-          this.failedAttempts.set(recipient, failedAttempts);
+        this.failedAttempts.delete(recipient);
+        logger.info(`Email sent successfully to ${options.to} (${info.messageId})`);
+        
+        return {
+          success: true,
+          messageId: info.messageId,
+          response: info.response
+        };
+      } catch (error) {
+        attempt++;
+        failedAttempts.count++;
+        failedAttempts.timestamp = Date.now();
+        this.failedAttempts.set(recipient, failedAttempts);
 
-          logger.warn(`Email attempt ${attempt} failed: ${error.message}`);
+        logger.error(`Email attempt ${attempt} failed:`, {
+          error: error.message,
+          recipient: options.to,
+          attempt: attempt
+        });
 
-          if (attempt === MAX_RETRIES) {
-            logger.error('Email delivery failed after retries:', {
-              error: error.message,
-              recipient: options.to,
-              stack: error.stack
-            });
-            throw new AppError(500, 'Failed to send email');
-          }
-
-          await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
+        if (attempt === MAX_RETRIES) {
+          throw new AppError(500, 'Failed to send email after multiple attempts');
         }
+
+        // Exponential backoff
+        await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
       }
-    })();
-
-    // Don't wait for the email to be sent
-    emailPromise.catch(error => {
-      logger.error('Background email task failed:', error);
-    });
-
-    // Return immediately while email sends in background
-    return { 
-      success: true, 
-      message: 'Email sending initiated' 
-    };
+    }
   }
 
   cleanupFailedAttempts() {
@@ -243,22 +236,30 @@ class NotificationService {
   }
 
   async sendVerificationNotification(email, token, req) {
-    const verificationLink =  env.CLIENT_URL + `/verify-email?token=${token}`;
-    // const verificationLink = `${req.protocol}://${req.get(
-    //   'host'
-    // )}/api/auth/verify-email?token=${token}`;
+    try {
+      const verificationLink = env.CLIENT_URL + `/verify-email?token=${token}`;
+      
+      logger.info(`Sending verification email to: ${email}`);
+      logger.debug(`Verification link: ${verificationLink}`);
 
-    return this.sendEmail({
-      to: email,
-      subject: 'Verify Your Email Address',
-      template: 'verify-email',
-      context: {
-        appName: env.APP_NAME || 'Our Service',
-        verificationLink,
-        expiryHours: 24, // This should match your actual token expiry
-        currentYear: new Date().getFullYear(),
-      },
-    });
+      const result = await this.sendEmail({
+        to: email,
+        subject: 'Verify Your Email Address',
+        template: 'verify-email',
+        context: {
+          appName: env.APP_NAME || 'Our Service',
+          verificationLink,
+          expiryHours: 24,
+          currentYear: new Date().getFullYear(),
+        },
+      });
+
+      logger.info(`Verification email sent successfully to: ${email}`);
+      return result;
+    } catch (error) {
+      logger.error(`Failed to send verification email to ${email}:`, error);
+      throw new AppError(500, 'Failed to send verification email. Please try again.');
+    }
   }
 
   async sendPasswordResetNotification(email, token, req) {
