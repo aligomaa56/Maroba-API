@@ -463,29 +463,50 @@ class AuthService {
     }
 
     logger.info(`Updating password for user: ${userId}`);
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { password: true },
-    });
+    
+    try {
+      const result = await prisma.$transaction(async (prisma) => {
+        // Find user and verify current password
+        const user = await prisma.user.findUnique({
+          where: { id: userId },
+          select: { password: true },
+        });
 
-    if (!user) {
-      logger.warn(`User not found for password update: ${userId}`);
-      throw new AppError(404, 'User not found');
+        if (!user) {
+          logger.warn(`User not found for password update: ${userId}`);
+          throw new AppError(404, 'User not found');
+        }
+
+        await this.verifyPassword(user.password, currentPassword);
+
+        // Hash new password
+        const hashedPassword = await hashPassword(newPassword);
+
+        // Update password
+        await prisma.user.update({
+          where: { id: userId },
+          data: { password: hashedPassword },
+        });
+
+        // Delete all refresh tokens
+        await prisma.refreshToken.deleteMany({
+          where: { userId }
+        });
+
+        return { success: true };
+      }, {
+        timeout: 10000,
+        maxWait: 5000,
+        isolationLevel: 'ReadCommitted'
+      });
+
+      logger.info(`Password updated successfully for user: ${userId}`);
+      return result;
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      logger.error('Password update failed:', error);
+      throw new AppError(500, 'Failed to update password');
     }
-
-    await this.verifyPassword(user.password, currentPassword);
-
-    const hashedPassword = await hashPassword(newPassword);
-
-    await prisma.$transaction([
-      prisma.user.update({
-        where: { id: userId },
-        data: { password: hashedPassword },
-      }),
-      this.deleteUserRefreshTokens(userId),
-    ]);
-
-    logger.info(`Password updated successfully for user: ${userId}`);
   }
 
   // Clean up expired refresh tokens. (Scheduled task)
