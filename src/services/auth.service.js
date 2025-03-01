@@ -77,6 +77,38 @@ class AuthService {
     return { id: newUser.id, email: newUser.email, username: newUser.username };
   }
 
+  async generateAndStoreTokens(userId, role) {
+    const jti = crypto.randomUUID();
+    const [accessToken, refreshToken] = await Promise.all([
+      jwt.sign(
+        { userId, role, jti },
+        process.env.JWT_ACCESS_SECRET,
+        { expiresIn: parsedJwtExpiration }
+      ),
+      jwt.sign(
+        { userId, role, jti },
+        process.env.JWT_REFRESH_SECRET,
+        { expiresIn: parsedRefreshExpiration }
+      )
+    ]);
+
+    const expiresAt = new Date(Date.now() + parsedRefreshExpiration);
+    await prisma.refreshToken.create({
+      data: {
+        token: refreshToken,
+        userId,
+        expiresAt
+      }
+    });
+
+    return { accessToken, refreshToken };
+  }
+
+  async deleteUserRefreshTokens(userId) {
+    await prisma.refreshToken.deleteMany({
+      where: { userId }
+    });
+  }
 
   async login(identifier, password, ip) {
     if (!identifier || !password) {
@@ -106,23 +138,12 @@ class AuthService {
       this.validateLoginAttempt(user, ip);
       await this.verifyPassword(user.password, password);
 
-      // *** Single Session Enforcement ***
-      // Check if the user already has an active session.
-      const activeSession = await prisma.refreshToken.findFirst({
-        where: {
-          userId: user.id,
-          expiresAt: { gt: new Date() },
-        },
-      });
-      if (activeSession) {
-        throw new AppError(
-          403,
-          'User already logged in from another session. Please log out first.'
-        );
-      }
-
+      // Delete any existing sessions before creating new one
+      await this.deleteUserRefreshTokens(user.id);
+      
       await this.resetFailedAttempts(user.id);
-      const tokens = await this.generateTokens(user.id, user.role);
+      const tokens = await this.generateAndStoreTokens(user.id, user.role);
+      
       logger.info(`Login successful for user: ${user.email}`);
       return tokens;
     } catch (error) {
@@ -144,7 +165,6 @@ class AuthService {
 
     try {
       const result = await prisma.$transaction(async (prisma) => {
-        // First find the user with minimal fields
         const user = await prisma.user.findFirst({
           where: {
             verificationToken: hashedToken,
@@ -159,7 +179,6 @@ class AuthService {
           throw new AppError(400, 'Invalid or expired verification token');
         }
 
-        // Update with minimal return fields
         await prisma.user.update({
           where: { id: user.id },
           data: {
@@ -169,22 +188,14 @@ class AuthService {
           }
         });
 
-        // Generate tokens
-        const tokens = await this.generateTokens(user.id, user.role);
-        logger.info(`Email verified successfully for user: ${user.email}`);
+        const tokens = await this.generateAndStoreTokens(user.id, user.role);
         
-        // Return minimal data
         return {
           user: { id: user.id, email: user.email },
           tokens
         };
-      }, {
-        timeout: 10000,
-        maxWait: 5000,
-        isolationLevel: 'ReadCommitted'
       });
 
-      // Return the result directly without wrapping
       return result;
     } catch (error) {
       if (error.code === 'P2025') {
@@ -219,7 +230,6 @@ class AuthService {
   }
 
   async refreshToken(refreshToken) {
-    // Combine initial validations
     if (!refreshToken || typeof refreshToken !== 'string') {
       logger.warn('Token refresh attempted with invalid token format');
       throw new AppError(400, 'Invalid refresh token format');
@@ -227,12 +237,11 @@ class AuthService {
 
     let decoded;
     try {
-      // Verify token and get stored token in parallel
       const [decodedToken, storedToken] = await Promise.all([
         jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET),
         prisma.refreshToken.findFirst({
           where: { token: refreshToken },
-          select: { expiresAt: true, userId: true }
+          select: { expiresAt: true, userId: true, token: true }
         })
       ]);
       decoded = decodedToken;
@@ -242,19 +251,32 @@ class AuthService {
         throw new AppError(401, 'Invalid refresh token');
       }
 
-      // Check expiration using timestamp comparison instead of Date object
+      // Check expiration using timestamp comparison
       if (storedToken.expiresAt.getTime() < Date.now()) {
+        // Delete expired token
+        await this.deleteUserRefreshTokens(storedToken.userId);
         logger.warn(`Expired refresh token used for user: ${decoded.userId}`);
         throw new AppError(401, 'Refresh token has expired');
       }
 
-    } catch (error) {
-      logger.error('Refresh token verification failed:', error);
-      throw new AppError(401, 'Invalid refresh token');
-    }
+      const result = await prisma.$transaction(async (prisma) => {
+        await this.deleteUserRefreshTokens(storedToken.userId);
+        return this.generateAndStoreTokens(decoded.userId, decoded.role);
+      });
 
-    logger.info(`Refreshing tokens for user: ${decoded.userId}`);
-    return this.generateTokens(decoded.userId, decoded.role);
+      logger.info(`Tokens refreshed successfully for user: ${decoded.userId}`);
+      return result;
+
+    } catch (error) {
+      if (error instanceof jwt.JsonWebTokenError) {
+        logger.warn('Invalid refresh token signature');
+        throw new AppError(401, 'Invalid refresh token');
+      }
+      if (error instanceof AppError) throw error;
+      
+      logger.error('Refresh token process failed:', error);
+      throw new AppError(500, 'Failed to refresh tokens');
+    }
   }
 
   async forgotPassword(email, req) {
@@ -404,9 +426,7 @@ class AuthService {
         });
 
         // Invalidate all refresh tokens
-        await prisma.refreshToken.deleteMany({
-          where: { userId: user.id }
-        });
+        await this.deleteUserRefreshTokens(user.id);
 
         return updatedUser;
       }, {
@@ -462,7 +482,7 @@ class AuthService {
         where: { id: userId },
         data: { password: hashedPassword },
       }),
-      prisma.refreshToken.deleteMany({ where: { userId } }),
+      this.deleteUserRefreshTokens(userId),
     ]);
 
     logger.info(`Password updated successfully for user: ${userId}`);
@@ -521,52 +541,6 @@ class AuthService {
   //   logger.info(`Google authentication successful for user: ${user.email}`);
   //   return user;
   // }
-
-
-
-  async generateTokens(userId, role) {
-    // Add validation for required parameters
-    if (!userId || !role) {
-      logger.error('Token generation attempted without required parameters');
-      throw new AppError(400, 'User ID and role are required for token generation');
-    }
-
-    logger.info(`Generating tokens for user: ${userId}`);
-    try {
-      // Generate both tokens in parallel for better performance
-      const jti = crypto.randomUUID();
-      const [accessToken, refreshToken] = await Promise.all([
-        jwt.sign(
-          { userId, role, jti },
-          process.env.JWT_ACCESS_SECRET,
-          { expiresIn: parsedJwtExpiration }
-        ),
-        jwt.sign(
-          { userId, role, jti },
-          process.env.JWT_REFRESH_SECRET,
-          { expiresIn: parsedRefreshExpiration }
-        )
-      ]);
-
-      const expiresAt = new Date(Date.now() + parsedRefreshExpiration);
-
-      // Store refresh token with error handling
-      try {
-        await prisma.refreshToken.create({
-          data: { token: refreshToken, userId, expiresAt }
-        });
-      } catch (error) {
-        logger.error(`Failed to store refresh token for user ${userId}:`, error);
-        throw new AppError(500, 'Failed to complete authentication process');
-      }
-
-      logger.debug(`Tokens generated successfully for user: ${userId}`);
-      return { accessToken, refreshToken };
-    } catch (error) {
-      logger.error(`Token generation failed for user ${userId}:`, error);
-      throw new AppError(500, 'Failed to generate authentication tokens');
-    }
-  }
 
   async verifyPassword(hashedPassword, candidatePassword) {
     if (!hashedPassword || !candidatePassword) {
