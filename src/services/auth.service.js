@@ -348,7 +348,7 @@ class AuthService {
   }
 
   async resetPassword(token, newPassword) {
-    // Add password validation
+    // Initial validation
     if (!token || !newPassword) {
       logger.warn('Password reset attempted with missing data');
       throw new AppError(400, 'Token and new password are required');
@@ -360,40 +360,64 @@ class AuthService {
     }
 
     logger.info('Processing password reset request');
-    const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
     try {
-      // Hash password in parallel with other operations
-      const [hashedPassword, user] = await Promise.all([
-        hashPassword(newPassword),
-        prisma.$transaction(async (prisma) => {
-          const user = await prisma.user.findFirst({
-            where: {
-              resetPasswordToken: hashedToken,
-              resetPasswordExpire: { gt: new Date() }
-            }
-          });
-
-          if (!user) {
-            logger.warn('Invalid or expired reset token used');
-            throw new AppError(400, 'Invalid or expired reset token');
-          }
-
-          return prisma.user.update({
-            where: { id: user.id },
-            data: {
-              password: hashedPassword,
-              resetPasswordToken: null,
-              resetPasswordExpire: null,
-              failedLoginAttempts: 0,
-              accountLockedUntil: null
-            }
-          });
-        })
+      // Run token hashing and password hashing in parallel
+      const [hashedToken, hashedPassword] = await Promise.all([
+        crypto.createHash('sha256').update(token).digest('hex'),
+        hashPassword(newPassword)
       ]);
 
-      logger.info(`Password reset successful for user: ${user.email}`);
-      return user;
+      // Execute the reset in a transaction
+      const result = await prisma.$transaction(async (prisma) => {
+        // Find user and update in a single transaction to prevent race conditions
+        const user = await prisma.user.findFirst({
+          where: {
+            resetPasswordToken: hashedToken,
+            resetPasswordExpire: { gt: new Date() }
+          },
+          select: {
+            id: true,
+            email: true
+          }
+        });
+
+        if (!user) {
+          logger.warn('Invalid or expired reset token used');
+          throw new AppError(400, 'Invalid or expired reset token');
+        }
+
+        // Update user with new password and reset token fields
+        const updatedUser = await prisma.user.update({
+          where: { id: user.id },
+          data: {
+            password: hashedPassword,
+            resetPasswordToken: null,
+            resetPasswordExpire: null,
+            failedLoginAttempts: 0,
+            accountLockedUntil: null
+          },
+          select: {
+            id: true,
+            email: true
+          }
+        });
+
+        // Optionally, invalidate all refresh tokens in parallel with the update
+        await prisma.refreshToken.deleteMany({
+          where: { userId: user.id }
+        });
+
+        return updatedUser;
+      }, {
+        timeout: 10000,
+        maxWait: 5000,
+        isolationLevel: 'ReadCommitted'
+      });
+
+      logger.info(`Password reset successful for user: ${result.email}`);
+      return result;
+
     } catch (error) {
       if (error instanceof AppError) throw error;
       logger.error('Password reset failed:', error);
