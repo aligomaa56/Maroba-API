@@ -263,21 +263,30 @@ class NotificationService {
   }
 
   async sendPasswordResetNotification(email, token, req) {
-    const resetLink = `${req.protocol}://${req.get(
-      'host'
-    )}/api/auth/reset-password?token=${token}`;
+    try {
+      const resetLink = env.CLIENT_URL + `/reset-password?token=${token}`;
+      
+      logger.info(`Sending password reset email to: ${email}`);
+      logger.debug(`Reset link: ${resetLink}`);
 
-    return this.sendEmail({
-      to: email,
-      subject: 'Password Reset Request',
-      template: 'reset-password',
-      context: {
-        appName: env.APP_NAME || 'Our Service',
-        resetLink,
-        expiryHours: 1, // This should match your actual token expiry
-        currentYear: new Date().getFullYear(),
-      },
-    });
+      const result = await this.sendEmail({
+        to: email,
+        subject: 'Reset Your Password',
+        template: 'reset-password',
+        context: {
+          appName: env.APP_NAME || 'Our Service',
+          resetLink,
+          expiryHours: 1, // Matches PASSWORD_RESET_EXPIRES_IN from auth.service
+          currentYear: new Date().getFullYear(),
+        },
+      });
+
+      logger.info(`Password reset email sent successfully to: ${email}`);
+      return result;
+    } catch (error) {
+      logger.error(`Failed to send password reset email to ${email}:`, error);
+      throw new AppError(500, 'Failed to send password reset email. Please try again.');
+    }
   }
 
   async sendOrderConfirmationNotification(email, orderDetails) {

@@ -259,44 +259,79 @@ class AuthService {
 
   async forgotPassword(email, req) {
     if (!email) {
+      logger.warn('Password reset requested without email');
       throw new AppError(400, 'Email is required');
     }
 
     logger.info(`Password reset requested for email: ${email}`);
-    const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) {
-      logger.warn(`Password reset requested for non-existing email: ${email}`);
-      return; // Do not reveal whether the email exists
+    
+    try {
+      const result = await prisma.$transaction(async (prisma) => {
+        const user = await prisma.user.findUnique({ 
+          where: { email },
+          select: {
+            id: true,
+            email: true,
+            resetPasswordAttempts: true,
+            resetPasswordLastAttempt: true
+          }
+        });
+
+        if (!user) {
+          logger.warn(`Password reset requested for non-existing email: ${email}`);
+          return; // Don't reveal if email exists
+        }
+
+        // Check rate limiting
+        const now = new Date();
+        const hourAgo = new Date(now - 3600000); // 1 hour ago
+
+        if (user.resetPasswordLastAttempt > hourAgo) {
+          const attemptsInLastHour = user.resetPasswordAttempts || 0;
+          if (attemptsInLastHour >= 3) {
+            logger.warn(`Too many password reset attempts for email: ${email}`);
+            throw new AppError(429, 'Too many reset attempts. Please try again in 1 hour.');
+          }
+        }
+
+        // Generate new token
+        const rawToken = crypto.randomBytes(32).toString('hex');
+        const hashedToken = crypto
+          .createHash('sha256')
+          .update(rawToken)
+          .digest('hex');
+        const expires = new Date(Date.now() + PASSWORD_RESET_EXPIRES_IN);
+
+        // Update user with new token and increment attempts
+        await prisma.user.update({
+          where: { id: user.id },
+          data: {
+            resetPasswordToken: hashedToken,
+            resetPasswordExpire: expires,
+            resetPasswordAttempts: user.resetPasswordLastAttempt > hourAgo 
+              ? (user.resetPasswordAttempts || 0) + 1 
+              : 1,
+            resetPasswordLastAttempt: now
+          },
+        });
+
+        return { email: user.email, rawToken };
+      });
+
+      if (result) {
+        await notificationService.sendPasswordResetNotification(
+          result.email,
+          result.rawToken,
+          req
+        );
+        logger.info(`Password reset token sent to email: ${result.email}`);
+      }
+
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      logger.error('Password reset process failed:', error);
+      throw new AppError(500, 'Failed to process password reset request');
     }
-
-    // *** Rate Limiting Password Resets ***
-    // If a reset token is already active, do not issue another one.
-    if (user.resetPasswordToken && user.resetPasswordExpire > new Date()) {
-      logger.warn(`Password reset already requested for email: ${email}`);
-      return;
-    }
-
-    const rawToken = crypto.randomBytes(32).toString('hex');
-    const hashedToken = crypto
-      .createHash('sha256')
-      .update(rawToken)
-      .digest('hex');
-    const expires = new Date(Date.now() + PASSWORD_RESET_EXPIRES_IN);
-
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        resetPasswordToken: hashedToken,
-        resetPasswordExpire: expires,
-      },
-    });
-
-    await notificationService.sendPasswordResetNotification(
-      email,
-      rawToken,
-      req
-    );
-    logger.info(`Password reset token sent to email: ${email}`);
   }
 
   async resetPassword(token, newPassword) {
