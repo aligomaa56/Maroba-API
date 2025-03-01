@@ -2,7 +2,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../prisma/prisma.client.js';
 import { AppError } from '../middleware/error.middleware.js';
-import { notificationService } from './notification.service.js';
+import notificationService from './notification.service.js';
 import crypto from 'crypto';
 import { UserRole } from '../utils/constants.js';
 import logger from '../middleware/logger.middleware.js';

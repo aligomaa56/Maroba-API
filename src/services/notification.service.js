@@ -309,4 +309,6 @@ class NotificationService {
   }
 }
 
-export const notificationService = new NotificationService();
+// Export a default instance
+const notificationService = new NotificationService();
+export default notificationService;
