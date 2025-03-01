@@ -272,8 +272,9 @@ class AuthService {
           select: {
             id: true,
             email: true,
-            resetPasswordAttempts: true,
-            resetPasswordLastAttempt: true
+            failedLoginAttempts: true,  // Using existing field for rate limiting
+            accountLockedUntil: true,   // Using existing field for lockout
+            resetPasswordExpire: true   // Check existing reset token expiry
           }
         });
 
@@ -286,12 +287,22 @@ class AuthService {
         const now = new Date();
         const hourAgo = new Date(now - 3600000); // 1 hour ago
 
-        if (user.resetPasswordLastAttempt > hourAgo) {
-          const attemptsInLastHour = user.resetPasswordAttempts || 0;
-          if (attemptsInLastHour >= 3) {
-            logger.warn(`Too many password reset attempts for email: ${email}`);
-            throw new AppError(429, 'Too many reset attempts. Please try again in 1 hour.');
-          }
+        if (user.accountLockedUntil && user.accountLockedUntil > now) {
+          logger.warn(`Account locked for password reset: ${email}`);
+          throw new AppError(429, 'Too many reset attempts. Please try again later.');
+        }
+
+        // Use failedLoginAttempts as our attempt counter
+        if (user.failedLoginAttempts >= 3 && user.resetPasswordExpire > hourAgo) {
+          // Lock the account for password resets
+          await prisma.user.update({
+            where: { id: user.id },
+            data: {
+              accountLockedUntil: new Date(Date.now() + 3600000) // Lock for 1 hour
+            }
+          });
+          logger.warn(`Too many password reset attempts for email: ${email}`);
+          throw new AppError(429, 'Too many reset attempts. Please try again in 1 hour.');
         }
 
         // Generate new token
@@ -302,17 +313,16 @@ class AuthService {
           .digest('hex');
         const expires = new Date(Date.now() + PASSWORD_RESET_EXPIRES_IN);
 
-        // Update user with new token and increment attempts
+        // Update user with new token and track attempts
         await prisma.user.update({
           where: { id: user.id },
           data: {
             resetPasswordToken: hashedToken,
             resetPasswordExpire: expires,
-            resetPasswordAttempts: user.resetPasswordLastAttempt > hourAgo 
-              ? (user.resetPasswordAttempts || 0) + 1 
-              : 1,
-            resetPasswordLastAttempt: now
-          },
+            failedLoginAttempts: user.resetPasswordExpire > hourAgo 
+              ? user.failedLoginAttempts + 1 
+              : 1
+          }
         });
 
         return { email: user.email, rawToken };
@@ -326,6 +336,9 @@ class AuthService {
         );
         logger.info(`Password reset token sent to email: ${result.email}`);
       }
+
+      // Always return success to prevent email enumeration
+      return { message: 'If the email exists, a password reset link will be sent.' };
 
     } catch (error) {
       if (error instanceof AppError) throw error;
