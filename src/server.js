@@ -3,6 +3,7 @@ import { env } from './config/env.config.js';
 import { createServer } from 'http';
 import logger from './middleware/logger.middleware.js';
 import { connectDatabase, disconnectDatabase, resetDatabaseConnection } from './prisma/prisma.client.js';
+import notificationService from './services/notification.service.js';
 
 class ServerInstance {
   constructor() {
@@ -153,6 +154,10 @@ class ServerInstance {
     try {
       this.registerProcessHandlers();
       await connectDatabase();
+      logger.info('Database connection established');
+
+      await notificationService.initialize();
+      logger.info('Email service initialized');
 
       return new Promise((resolve, reject) => {
         this.server = this.httpServer.listen(this.PORT, () => {
