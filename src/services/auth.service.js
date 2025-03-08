@@ -509,7 +509,6 @@ class AuthService {
     }
   }
 
-  // Clean up expired refresh tokens. (Scheduled task)
   async cleanExpiredTokens() {
     const batchSize = 1000;
     let deleted = 0;
@@ -525,53 +524,94 @@ class AuthService {
     } while (deleted === batchSize);
   }
 
-  // async handleGoogleLogin(profile) {
-  //   if (!profile || !profile.emails || !profile.emails[0]) {
-  //     throw new AppError(400, 'Invalid Google profile data');
-  //   }
-
-  //   const { id: googleId, displayName, emails, name } = profile;
-  //   const email = emails[0].value;
-  //   const firstName = name?.givenName || '';
-  //   const lastName = name?.familyName || '';
-
-  //   let user = await prisma.user.findUnique({ where: { email } });
-
-  //   if (user) {
-  //     if (!user.isGoogleUser) {
-  //       user = await prisma.user.update({
-  //         where: { id: user.id },
-  //         data: {
-  //           googleId,
-  //           isGoogleUser: true,
-  //           isVerified: true,
-  //         },
-  //       });
-  //     }
-  //   } else {
-  //     const username = email.split('@')[0];
-  //     const randomPassword = crypto.randomBytes(16).toString('hex');
-  //     const hashedPassword = await hashPassword(randomPassword);
-
-  //     user = await prisma.user.create({
-  //       data: {
-  //         email,
-  //         username,
-  //         firstName,
-  //         lastName,
-  //         password: hashedPassword,
-  //         googleId,
-  //         isGoogleUser: true,
-  //         isVerified: true,
-  //         role: UserRole.USER,
-  //       },
-  //     });
-  //   }
-
-  //   logger.info(`Google authentication successful for user: ${user.email}`);
-  //   return user;
-  // }
-
+  async handleGoogleLogin(profile) {
+    if (!profile || !profile.emails || !profile.emails[0]) {
+      logger.warn('Invalid Google profile data provided');
+      throw new AppError(400, 'Invalid Google profile data');
+    }
+  
+    const { id: googleId, emails, name } = profile;
+    const email = emails[0].value;
+    const firstName = name?.givenName || '';
+    const lastName = name?.familyName || '';
+  
+    try {
+      // Find or create the user in a transaction
+      const user = await prisma.$transaction(async (prismaTx) => {
+        let user = await prismaTx.user.findUnique({ 
+          where: { email },
+          select: { 
+            id: true, 
+            email: true, 
+            isGoogleUser: true, 
+            role: true,
+            googleId: true
+          }
+        });
+  
+        if (user) {
+          // Update existing user if needed
+          if (!user.isGoogleUser || user.googleId !== googleId) {
+            user = await prismaTx.user.update({
+              where: { id: user.id },
+              data: {
+                googleId,
+                isGoogleUser: true,
+                isVerified: true,
+              },
+              select: { 
+                id: true, 
+                email: true,
+                role: true 
+              }
+            });
+          }
+        } else {
+          // Create new user
+          const username = `${email.split('@')[0]}_${Date.now().toString().slice(-4)}`;
+          const randomPassword = crypto.randomBytes(16).toString('hex');
+          const hashedPassword = await hashPassword(randomPassword);
+  
+          user = await prismaTx.user.create({
+            data: {
+              email,
+              username,
+              firstName,
+              lastName,
+              password: hashedPassword,
+              googleId,
+              isGoogleUser: true,
+              isVerified: true,
+              failedLoginAttempts: 0,
+              accountLockedUntil: null,
+              role: UserRole.USER,
+            },
+            select: { 
+              id: true, 
+              email: true,
+              role: true
+            }
+          });
+        }
+  
+        return user;
+      });
+  
+      // Enforce single session: Delete any existing refresh tokens for this user
+      await this.deleteUserRefreshTokens(user.id);
+  
+      // Generate new tokens for the session
+      const tokens = await this.generateAndStoreTokens(user.id, user.role);
+  
+      logger.info(`Google authentication successful for user: ${user.email}`);
+      return { user, tokens };
+    } catch (error) {
+      logger.error('Google authentication failed:', error);
+      if (error instanceof AppError) throw error;
+      throw new AppError(500, 'Failed to authenticate with Google');
+    }
+  }
+    
   async verifyPassword(hashedPassword, candidatePassword) {
     if (!hashedPassword || !candidatePassword) {
       logger.warn('Password verification attempted with missing data');

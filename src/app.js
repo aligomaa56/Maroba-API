@@ -1,6 +1,6 @@
 import express from 'express';
 import passport from 'passport';
-// import configurePassport from './config/passport.config.js';
+import configurePassport from './config/passport.config.js';
 import cors from 'cors';
 import corsOptions from './config/cors.config.js';
 import { errorHandler } from './middleware/error.middleware.js';
@@ -20,7 +20,7 @@ import authRoutes from './routes/auth.routes.js';
 const app = express();
 
 // Pre-configure passport before middleware setup
-// configurePassport();
+configurePassport();
 
 // Essential middleware only
 app.use(express.json({ limit: '10kb' }));
